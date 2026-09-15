@@ -15,14 +15,14 @@ type command struct {
 var commands = []command{
 	{
 		name:    "diff",
-		usage:   "hostdiff diff A [B] [flags]",
+		usage:   "hostdiff diff [A] B [flags]",
 		summary: "compare two machines or snapshots",
 		about: `Collects a snapshot of each side and prints what differs, section by
-section: ◀ only on A, ▶ only on B, ≠ different on both. B defaults to this
-machine. A and B can be:
+section: ◀ only on A, ▶ only on B, ≠ different on both. With one argument,
+A is this machine. A and B can be:
 
   NAME          a machine from the config file (reached over ssh, or local)
-  local         this machine
+  localhost     this machine (also "local" or ".")
   FILE.json     a snapshot saved with "hostdiff snap -o FILE.json"
   NAME@last     the newest snapshot saved with --save for NAME (also @prev)
 
@@ -30,9 +30,13 @@ In a terminal, diff opens an interactive view: sections on the left, what
 differs on the right, Enter for the content diff of an item, s for the
 install script. Piped, or with --format, --all or --details, it prints text.
 
+Comparing a machine with itself is refused before anything is collected:
+this machine twice, or an ssh destination that ssh -G resolves back here
+for the same account.
+
 The exit status of printed output is 0 when nothing differs, 1 when
 something does, 2 on error.`,
-		examples: `hostdiff diff laptop                  # laptop vs this machine
+		examples: `hostdiff diff laptop                  # this machine vs laptop
 hostdiff diff laptop desk --only brew,apps
 hostdiff diff laptop --details        # include changed file contents
 hostdiff diff laptop --script > sync.sh   # commands to bring laptop's tools here
@@ -43,7 +47,7 @@ hostdiff diff old.json new.json --format markdown`,
 --all             also list items that are the same
 --details         show content diffs for changed files and plists
 --format FORMAT   text (default), markdown or json
---script          print a shell script that makes B more like A (never runs it)
+--script          print a shell script, run on A, that brings over what B has (never runs it)
 --save            also save the collected snapshots (see NAME@last)
 --no-color        plain text output`,
 	},

@@ -289,7 +289,7 @@ func (m Model) key(k string, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.showDeps = !m.showDeps
 	case "s":
 		m.detail = strings.Split(strings.TrimRight(fix.Script(m.res), "\n"), "\n")
-		m.detailName = fmt.Sprintf("Script to make %s more like %s (review it, then copy what you need)", m.res.B.Label, m.res.A.Label)
+		m.detailName = fmt.Sprintf("Script to make %s more like %s (review it, then copy what you need)", m.res.A.Label, m.res.B.Label)
 		m.detailTop = 0
 	}
 	m.clamp()

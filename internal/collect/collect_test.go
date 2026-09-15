@@ -300,16 +300,16 @@ func TestLibraries(t *testing.T) {
 	writeFile(t, e.HomePath(".julia", "environments", "v1.10", "Project.toml"), "[deps]\nPlots = \"91a5bcdd-55d7-5caf-9e0b-520d859cae80\"\n\n[compat]\nPlots = \"1\"\n", 0o644)
 	s := section(t, e, "libraries")
 	for key, want := range map[string]string{
-		"python3.12 › requests": "2.32.3/user",
-		"python3.12 › pip":      "24.0/system",
-		"gem › rake":            "13.2.1/",
-		"gem › json":            "2.7.1/default",
-		"gem › minitest":        "5.20.0, 5.16.3/",
-		"perl › Moose":          "2.2206/",
+		"python3.12 › requests":        "2.32.3/user",
+		"python3.12 › pip":             "24.0/system",
+		"gem › rake":                   "13.2.1/",
+		"gem › json":                   "2.7.1/default",
+		"gem › minitest":               "5.20.0, 5.16.3/",
+		"perl › Moose":                 "2.2206/",
 		"composer › laravel/installer": "v5.8.0/",
-		"R › dplyr":             "1.1.4/",
-		"julia v1.10 › Plots":   "added/",
-		"luarocks › lpeg":       "1.1.0-1/",
+		"R › dplyr":                    "1.1.4/",
+		"julia v1.10 › Plots":          "added/",
+		"luarocks › lpeg":              "1.1.0-1/",
 	} {
 		it := find(s, key)
 		if it == nil || it.Value+"/"+it.Tag != want {
@@ -337,14 +337,14 @@ esac`)
 	}
 	s := section(t, e, "toolchains")
 	for key, want := range map[string]string{
-		"pyenv › 3.12.4":                        "installed",
-		"rustup › stable-aarch64-apple-darwin":  "default",
-		"rustup › nightly-aarch64-apple-darwin": "installed",
+		"pyenv › 3.12.4":                                 "installed",
+		"rustup › stable-aarch64-apple-darwin":           "default",
+		"rustup › nightly-aarch64-apple-darwin":          "installed",
 		"rustup component › clippy-aarch64-apple-darwin": "installed",
-		"asdf › nodejs 22.1.0":                  "installed",
-		"nvm › v20.11.0":                        "installed",
-		"jdk › temurin-21.jdk":                  "installed",
-		"sdkman java › 21.0.2-tem":              "installed",
+		"asdf › nodejs 22.1.0":                           "installed",
+		"nvm › v20.11.0":                                 "installed",
+		"jdk › temurin-21.jdk":                           "installed",
+		"sdkman java › 21.0.2-tem":                       "installed",
 	} {
 		if it := find(s, key); it == nil || it.Value != want {
 			t.Errorf("%s = %+v, want %s", key, it, want)

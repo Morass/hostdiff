@@ -43,15 +43,18 @@ type script struct {
 	skipped []string
 }
 
-func (sc *script) add(format string, args ...any) { sc.lines = append(sc.lines, fmt.Sprintf(format, args...)) }
+func (sc *script) add(format string, args ...any) {
+	sc.lines = append(sc.lines, fmt.Sprintf(format, args...))
+}
 func (sc *script) skip(kind, key, why string) {
 	sc.skipped = append(sc.skipped, "# skipped "+comment(kind+" "+key)+": "+why)
 }
 
-// Script returns the commands, run on B, that bring over what only A has, and
+// Script returns the commands, run on A, that bring over what only B has, and
 // comments for the rest (removals and version differences are never
-// automatic).
+// automatic). A is the first side, normally the machine you are on.
 func Script(r *diff.Result) string {
+	r = r.Reversed()
 	sc := &script{}
 	a, b := comment(r.A.Label), comment(r.B.Label)
 	sc.add("#!/bin/sh")

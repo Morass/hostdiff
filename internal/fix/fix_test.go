@@ -13,7 +13,10 @@ import (
 
 func result(sections ...diff.Section) *diff.Result {
 	s := &snapshot.Snapshot{}
-	return &diff.Result{A: diff.Side{Label: "laptop", Snap: s}, B: diff.Side{Label: "desk", Snap: s}, Sections: sections}
+	// Written from laptop's side for readability; the script runs on desk,
+	// the first side, to bring over what laptop has.
+	r := &diff.Result{A: diff.Side{Label: "laptop", Snap: s}, B: diff.Side{Label: "desk", Snap: s}, Sections: sections}
+	return r.Reversed()
 }
 
 func TestInstallCommands(t *testing.T) {

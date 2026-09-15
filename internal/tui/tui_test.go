@@ -125,7 +125,7 @@ func TestUnavailableSectionExplains(t *testing.T) {
 
 func TestScriptView(t *testing.T) {
 	v := send(start(), "s").View()
-	if !strings.Contains(v, "brew install 'jq'") || !strings.Contains(v, "Script to make desk more like laptop") {
+	if !strings.Contains(v, "brew install 'wget'") || !strings.Contains(v, "Script to make laptop more like desk") {
 		t.Fatalf("script view:\n%s", v)
 	}
 }

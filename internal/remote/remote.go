@@ -11,6 +11,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"regexp"
@@ -213,4 +214,88 @@ func failure(code int, stderr []byte) string {
 		return "ssh could not connect: " + msg
 	}
 	return fmt.Sprintf("remote hostdiff exited with %d: %s", code, msg)
+}
+
+// Endpoint is where an ssh destination leads, as ssh itself resolves it from
+// ~/.ssh/config without connecting (ssh -G).
+type Endpoint struct {
+	User string
+	Host string
+	Port string
+	// Proxied is true when a ProxyJump or ProxyCommand is involved; the
+	// host name is then resolved elsewhere and says nothing about this side.
+	Proxied bool
+}
+
+// Resolve asks the local ssh client where a destination leads. It never
+// opens a connection.
+func Resolve(m *config.Machine, opt Options) (Endpoint, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, sshProgram(opt), "-G", "--", m.SSH)
+	out, err := cmd.Output()
+	if err != nil {
+		return Endpoint{}, err
+	}
+	var ep Endpoint
+	for _, l := range strings.Split(string(out), "\n") {
+		k, v, _ := strings.Cut(strings.TrimSpace(l), " ")
+		switch strings.ToLower(k) {
+		case "user":
+			ep.User = v
+		case "hostname":
+			ep.Host = v
+		case "port":
+			ep.Port = v
+		case "proxyjump", "proxycommand":
+			if v != "" && v != "none" {
+				ep.Proxied = true
+			}
+		}
+	}
+	if ep.Host == "" {
+		return Endpoint{}, errors.New("ssh -G printed no host name")
+	}
+	return ep, nil
+}
+
+// Addresses returns the IP addresses the endpoint's host name stands for,
+// "this machine" when one of them belongs to a local interface. Names that
+// do not resolve within the deadline yield nothing.
+func (ep Endpoint) Addresses() (addrs []string, here bool) {
+	if ep.Proxied {
+		return nil, false
+	}
+	host := strings.Trim(ep.Host, "[]")
+	if strings.EqualFold(host, "localhost") {
+		return nil, true
+	}
+	local := map[string]bool{}
+	if ifaddrs, err := net.InterfaceAddrs(); err == nil {
+		for _, a := range ifaddrs {
+			if ipn, ok := a.(*net.IPNet); ok {
+				local[ipn.IP.String()] = true
+			}
+		}
+	}
+	names := []string{host}
+	if net.ParseIP(host) == nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		names, _ = net.DefaultResolver.LookupHost(ctx, host)
+		if h, err := os.Hostname(); err == nil && strings.EqualFold(strings.TrimSuffix(host, "."), h) {
+			here = true
+		}
+	}
+	for _, n := range names {
+		ip := net.ParseIP(n)
+		if ip == nil {
+			continue
+		}
+		if ip.IsLoopback() || local[ip.String()] {
+			here = true
+		}
+		addrs = append(addrs, ip.String())
+	}
+	return addrs, here
 }

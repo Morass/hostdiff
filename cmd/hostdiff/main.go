@@ -9,6 +9,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"os/user"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -158,13 +159,13 @@ func resolve(cfg *config.Config, arg string) (*target, error) {
 		}
 		return &target{label: arg, file: p}, nil
 	}
-	if arg == "local" || arg == "." {
+	if arg == "localhost" || arg == "local" || arg == "." {
 		for _, n := range cfg.Names() {
 			if cfg.Machines[n].Local {
 				return &target{label: n, save: n}, nil
 			}
 		}
-		return &target{label: "local", save: "local"}, nil
+		return &target{label: "localhost", save: "localhost"}, nil
 	}
 	if m, ok := cfg.Machines[arg]; ok {
 		t := &target{label: arg, save: arg}
@@ -183,7 +184,7 @@ func resolve(cfg *config.Config, arg string) (*target, error) {
 	if cfg.Found {
 		hint = "machines in " + cfg.Path + ": " + strings.Join(cfg.Names(), ", ")
 	}
-	return nil, fmt.Errorf("%q is not a configured machine, \"local\", or a snapshot file (%s)", arg, hint)
+	return nil, fmt.Errorf("%q is not a configured machine, \"localhost\", or a snapshot file (%s)", arg, hint)
 }
 
 func stateDir() string {
@@ -268,6 +269,66 @@ func (t *target) collect(cfg *config.Config, opt collectOpts) (*snapshot.Snapsho
 	return remote.Snapshot(t.machine, remote.Options{Only: opt.only, Skip: skip})
 }
 
+// sameDevice reports, before anything is collected, when both sides would be
+// read live from the same account on the same machine: this machine twice,
+// or an ssh destination that leads back here (or to the other side's host).
+// It only uses what ssh -G and name resolution say locally; when in doubt
+// the sides count as different.
+func sameDevice(a, b *target) (string, bool) {
+	ids := func(t *target) (map[string]bool, string) {
+		if t.file != "" {
+			return nil, ""
+		}
+		me := currentUser()
+		if t.machine == nil {
+			return map[string]bool{me + "@this machine": true}, "this machine"
+		}
+		ep, err := remote.Resolve(t.machine, remote.Options{})
+		if err != nil {
+			return nil, ""
+		}
+		user := ep.User
+		if user == "" {
+			user = me
+		}
+		addrs, here := ep.Addresses()
+		if here {
+			return map[string]bool{user + "@this machine": true}, "ssh " + t.machine.SSH + " leads back to this machine"
+		}
+		set := map[string]bool{}
+		for _, ip := range addrs {
+			set[user+"@"+ip+":"+ep.Port] = true
+		}
+		return set, "ssh " + t.machine.SSH + " leads to " + ep.Host
+	}
+	ia, wa := ids(a)
+	if ia == nil {
+		return "", false
+	}
+	ib, wb := ids(b)
+	for k := range ia {
+		if ib[k] {
+			switch {
+			case a.machine == nil && b.machine == nil:
+				return "both are this machine", true
+			case a.machine == nil:
+				return wb, true
+			case b.machine == nil:
+				return wa, true
+			}
+			return wa + ", as does " + b.machine.SSH, true
+		}
+	}
+	return "", false
+}
+
+func currentUser() string {
+	if u, err := user.Current(); err == nil {
+		return u.Username
+	}
+	return os.Getenv("USER")
+}
+
 func isTerminal(w io.Writer) bool {
 	f, ok := w.(*os.File)
 	return ok && (isatty.IsTerminal(f.Fd()) || isatty.IsCygwinTerminal(f.Fd()))
@@ -291,7 +352,7 @@ func cmdDiff(args []string, stdout, stderr io.Writer) error {
 		return fmt.Errorf("usage: hostdiff diff A [B]")
 	}
 	if len(pos) == 1 {
-		pos = append(pos, "local")
+		pos = []string{"localhost", pos[0]}
 	}
 	onlyK, skipK := splitList(*only), splitList(*skip)
 	if err := checkKinds(append(append([]string{}, onlyK...), skipK...)); err != nil {
@@ -306,6 +367,9 @@ func cmdDiff(args []string, stdout, stderr io.Writer) error {
 		if targets[i], err = resolve(cfg, p); err != nil {
 			return err
 		}
+	}
+	if why, same := sameDevice(targets[0], targets[1]); same {
+		return fmt.Errorf("%s and %s are the same machine (%s); nothing to compare live. To see what changes over time, run hostdiff snap %s --save now and hostdiff diff %s@last later", pos[0], pos[1], why, targets[1].save, targets[1].save)
 	}
 	if targets[0].label == targets[1].label {
 		targets[1].label += " (2)"
@@ -341,7 +405,9 @@ func cmdDiff(args []string, stdout, stderr io.Writer) error {
 	}
 	res := diff.Compare(diff.Side{Label: targets[0].label, Snap: snaps[0]}, diff.Side{Label: targets[1].label, Snap: snaps[1]}, diff.Options{Only: onlyK, Ignore: cfg.Ignore})
 	formatSet := false
-	fs.Visit(func(f *flag.Flag) { formatSet = formatSet || f.Name == "format" || f.Name == "all" || f.Name == "details" })
+	fs.Visit(func(f *flag.Flag) {
+		formatSet = formatSet || f.Name == "format" || f.Name == "all" || f.Name == "details"
+	})
 	switch {
 	case *script:
 		fmt.Fprint(stdout, fix.Script(res))
@@ -392,7 +458,7 @@ func cmdSnap(args []string, stdout, stderr io.Writer) error {
 		}
 		cfg = &config.Config{Machines: map[string]*config.Machine{}}
 	}
-	name := "local"
+	name := "localhost"
 	if len(pos) == 1 {
 		name = pos[0]
 	}

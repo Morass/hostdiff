@@ -41,7 +41,7 @@ Or from a checkout: `go build -o ~/.local/bin/hostdiff ./cmd/hostdiff`.
 ```sh
 hostdiff config init                 # creates ~/.config/hostdiff/config.toml
 $EDITOR "$(hostdiff config path)"     # add a machine: ssh = "laptop"
-hostdiff diff laptop                 # laptop vs this machine
+hostdiff diff laptop                 # this machine vs laptop
 ```
 
 No config at all is needed for files:
@@ -60,25 +60,25 @@ the install script. Piped or with `--format text|markdown|json` it prints
 instead.
 
 ```text
-◀ laptop (lap, macOS/arm64, 2026-09-15 17:30)
-▶ desk (desk, macOS/arm64, 2026-09-15 17:30)
+◀ desk (desk, macOS/arm64, 2026-09-15 17:30)
+▶ laptop (lap, macOS/arm64, 2026-09-15 17:30)
 
 Homebrew  3 only on laptop · 1 only on desk · 2 differ · 12 in dependencies · 140 same
-  ◀ cask › rectangle           0.87
-  ◀ formula › jq               1.7.1
-  ◀ formula › ripgrep          14.1.0
-  ▶ formula › wget             1.25.0
-  ≠ formula › node             26.8.1 │ 25.1.0
-  ≠ formula › python@3.13      3.13.7 │ 3.13.5
+  ▶ cask › rectangle           0.87
+  ▶ formula › jq               1.7.1
+  ▶ formula › ripgrep          14.1.0
+  ◀ formula › wget             1.25.0
+  ≠ formula › node             25.1.0 │ 26.8.1
+  ≠ formula › python@3.13      3.13.5 │ 3.13.7
   … and 12 differences in dependencies (installed only because other packages need them; --all lists them)
 
 Keyboard shortcuts  1 only on laptop · 1 differ · 24 same
-  ◀ app › com.apple.Safari › Show Tab Overview  cmd+shift+\
-  ≠ system › Show Spotlight search             on ctrl+space │ on cmd+space
+  ▶ app › com.apple.Safari › Show Tab Overview  cmd+shift+\
+  ≠ system › Show Spotlight search             on cmd+space │ on ctrl+space
 
 Dotfiles  2 differ · 5 same
-  ≠ ~/.zshrc      content 9b21e04c7a10 │ content 5f0c0a2e3d41
-  ≠ ~/.gitconfig  content 7926bf107405 │ content 5fb7728f1b95
+  ≠ ~/.zshrc      content 5f0c0a2e3d41 │ content 9b21e04c7a10
+  ≠ ~/.gitconfig  content 5fb7728f1b95 │ content 7926bf107405
 
 6 differences. Add --details to see changed file contents.
 ```
@@ -151,16 +151,22 @@ it. Otherwise install hostdiff there, or use snapshot files.
 refers to it later: `hostdiff diff laptop@last laptop` shows what changed on
 the laptop since then.
 
+**Same machine.** A live comparison of a machine with itself is refused
+before anything is collected: `localhost` twice, the machine marked
+`local = true`, or an ssh destination that `ssh -G` resolves to one of this
+machine's addresses for the same account. Another account on the same machine
+is still compared.
+
 ## Command reference
 
 ```text
-hostdiff diff A [B]        compare two machines or snapshots (B defaults to this machine)
+hostdiff diff [A] B        compare two machines or snapshots (A defaults to this machine)
   --only LIST              compare only these sections
   --skip LIST              do not collect these sections
   --all                    also list items that are the same, and dependencies
   --details                show content diffs for changed files and plists
   --format FORMAT          text, markdown or json (default: interactive in a terminal)
-  --script                 print a shell script that makes B more like A
+  --script                 print a shell script, run on A, that brings over what B has
   --save                   keep the collected snapshots for NAME@last
 
 hostdiff snap [NAME]       take a snapshot of this or another machine

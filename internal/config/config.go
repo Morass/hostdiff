@@ -101,8 +101,8 @@ func (c *Config) validate() error {
 		if !nameRe.MatchString(name) {
 			return fmt.Errorf("machine name %q: use letters, digits, dot, dash or underscore", name)
 		}
-		if name == "local" {
-			return fmt.Errorf(`machine name "local" is reserved for this machine`)
+		if name == "local" || name == "localhost" {
+			return fmt.Errorf(`machine name %q is reserved for this machine`, name)
 		}
 		if m.Local == (m.SSH != "") {
 			return fmt.Errorf("machine %q: set exactly one of ssh = \"DESTINATION\" or local = true", name)

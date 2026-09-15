@@ -96,7 +96,17 @@ func newWorld(t *testing.T) *world {
 	}
 	// Fake ssh: `ssh [options] -- DEST COMMAND` runs COMMAND with the home
 	// $FAKE_SSH_ROOT/DEST, the way sshd hands it to the login shell.
+	// `ssh -G -- DEST` prints where DEST leads: "self" and "other@self" come
+	// back to this machine, anything else to a documentation address.
 	write(t, filepath.Join(root, "bin", "ssh"), `#!/bin/sh
+if [ "$1" = "-G" ]; then
+  case "$3" in
+  self) printf 'user %s\nhostname localhost\nport 22\n' "$(id -un)";;
+  other@self) printf 'user other\nhostname localhost\nport 22\n';;
+  *) printf 'user %s\nhostname 2001:db8::10\nport 22\n' "$(id -un)";;
+  esac
+  exit 0
+fi
 while [ $# -gt 0 ]; do if [ "$1" = "--" ]; then shift; break; fi; shift; done
 dest=$1; shift
 home="$FAKE_SSH_ROOT/$dest"
@@ -252,7 +262,7 @@ func TestDiffFiles(t *testing.T) {
 		t.Errorf("json: %s", js.stdout)
 	}
 	sc := w.run("diff", a, b, "--script")
-	if !strings.Contains(sc.stdout, "brew install 'jq'") || !strings.Contains(sc.stdout, "# only on b: brew uninstall 'wget'") {
+	if !strings.Contains(sc.stdout, "brew install 'wget'") || !strings.Contains(sc.stdout, "# only on a: brew uninstall 'jq'") {
 		t.Errorf("script:\n%s", sc.stdout)
 	}
 	only := w.run("diff", a, b, "--only", "dotfiles", "--no-color")
@@ -279,19 +289,23 @@ upload = "never"
 ssh = "nowhere"
 [machines.here]
 local = true
+[machines.self]
+ssh = "self"
+[machines.other]
+ssh = "other@self"
 `)
 	r := w.run("diff", "laptop", "--no-color")
 	if r.code != 1 {
 		t.Fatalf("laptop diff: %+v", r)
 	}
-	for _, want := range []string{"◀ laptop", "▶ here", "◀ formula › ripgrep", "▶ formula › node"} {
+	for _, want := range []string{"◀ here", "▶ laptop", "▶ formula › ripgrep", "◀ formula › node"} {
 		if !strings.Contains(r.stdout, want) {
 			t.Errorf("missing %q in:\n%s", want, r.stdout)
 		}
 	}
 	// Shortcuts come back empty-handed over ssh only when the tool returns
 	// nothing; here the stub answers, so they are compared.
-	if runtime.GOOS == "darwin" && !strings.Contains(r.stdout, "◀ Resize image") {
+	if runtime.GOOS == "darwin" && !strings.Contains(r.stdout, "▶ Resize image") {
 		t.Errorf("shortcuts not compared:\n%s", r.stdout)
 	}
 	noLeak(t, "remote diff", r.stdout+r.stderr, w)
@@ -303,6 +317,21 @@ local = true
 	left, _ := filepath.Glob(filepath.Join(w.root, "hostdiff.*"))
 	if len(left) != 0 {
 		t.Errorf("uploaded binary left behind: %v", left)
+	}
+
+	// Diffing a machine with itself is refused before anything is collected.
+	for _, args := range [][]string{{"here"}, {"localhost", "here"}, {"self"}, {"self", "localhost"}} {
+		r := w.run(append([]string{"diff"}, args...)...)
+		if r.code != 2 || !strings.Contains(r.stderr, "same machine") || strings.Contains(r.stderr, "collecting") {
+			t.Errorf("diff %v with itself: %+v", args, r)
+		}
+	}
+	if r := w.run("diff", "self"); !strings.Contains(r.stderr, "ssh self leads back to this machine") {
+		t.Errorf("reason missing: %+v", r)
+	}
+	// Another account on the same machine is a real comparison.
+	if r := w.run("diff", "other"); strings.Contains(r.stderr, "same machine") {
+		t.Errorf("other account refused: %+v", r)
 	}
 
 	never := w.run("diff", "locked")

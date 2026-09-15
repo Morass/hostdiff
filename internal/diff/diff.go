@@ -51,6 +51,23 @@ type Result struct {
 	Sections []Section `json:"sections"`
 }
 
+// Reversed returns the same comparison seen from the other side.
+func (r *Result) Reversed() *Result {
+	out := &Result{A: r.B, B: r.A, Sections: make([]Section, len(r.Sections))}
+	for i, s := range r.Sections {
+		s.StatusA, s.StatusB = s.StatusB, s.StatusA
+		s.NoteA, s.NoteB = s.NoteB, s.NoteA
+		s.OnlyA, s.OnlyB = s.OnlyB, s.OnlyA
+		changed := make([]Change, len(s.Changed))
+		for j, c := range s.Changed {
+			changed[j] = Change{Key: c.Key, A: c.B, B: c.A, DetailA: c.DetailB, DetailB: c.DetailA, TagA: c.TagB, TagB: c.TagA}
+		}
+		s.Changed = changed
+		out.Sections[i] = s
+	}
+	return out
+}
+
 // Differences counts differences across all sections.
 func (r *Result) Differences() int {
 	n := 0
