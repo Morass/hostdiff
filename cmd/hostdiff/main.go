@@ -43,7 +43,7 @@ func main() {
 		os.Exit(1)
 	case errors.Is(err, flag.ErrHelp):
 	default:
-		fmt.Fprintln(os.Stderr, "hostdiff:", err)
+		fmt.Fprintln(os.Stderr, "hostdiff:", snapshot.StripControls(err.Error()))
 		os.Exit(2)
 	}
 }
@@ -178,7 +178,7 @@ func resolve(cfg *config.Config, arg string) (*target, error) {
 		if _, err := os.Stat(arg); err != nil {
 			return nil, err
 		}
-		return &target{label: strings.TrimSuffix(filepath.Base(arg), ".json"), file: arg}, nil
+		return &target{label: snapshot.StripControls(strings.TrimSuffix(filepath.Base(arg), ".json")), file: arg}, nil
 	}
 	hint := "run: hostdiff config init"
 	if cfg.Found {
@@ -427,6 +427,16 @@ func cmdDiff(args []string, stdout, stderr io.Writer) error {
 	}
 	if res.Differences() > 0 {
 		return errDifferent
+	}
+	comparable := 0
+	for _, s := range res.Sections {
+		if s.Comparable {
+			comparable++
+		}
+	}
+	if comparable == 0 && len(res.Sections) > 0 {
+		// "No differences" must not pass a check when nothing was compared.
+		return errors.New("no section could be compared on both sides")
 	}
 	return nil
 }

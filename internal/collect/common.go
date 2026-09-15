@@ -240,6 +240,31 @@ func (e *Env) linkTarget(p string) (target string, protected bool) {
 	return target, true
 }
 
+// pathProtected reports whether reaching p would pass through a
+// privacy-protected folder: p itself, or any folder on the way being one or
+// linking into one. It reads link text only, never the folders themselves,
+// so it has to run before anything under p is opened or even stat'ed.
+func (e *Env) pathProtected(p string) bool {
+	if e.OS != "darwin" {
+		return false
+	}
+	p = filepath.Clean(p)
+	if e.isProtected(p) {
+		return true
+	}
+	cur := string(filepath.Separator)
+	for _, part := range strings.Split(strings.TrimPrefix(p, cur), cur) {
+		if part == "" {
+			continue
+		}
+		cur = filepath.Join(cur, part)
+		if _, protected := e.linkTarget(cur); protected {
+			return true
+		}
+	}
+	return false
+}
+
 func (e *Env) isProtected(p string) bool {
 	if e.OS != "darwin" {
 		return false
@@ -262,10 +287,14 @@ func (e *Env) isProtected(p string) bool {
 func dotfiles(e *Env, s *snapshot.Section) {
 	for _, rel := range dotfileList {
 		p := e.HomePath(rel)
+		key := "~/" + rel
+		if e.pathProtected(filepath.Dir(p)) {
+			s.Add(key, "not read: its folder links into a privacy-protected folder", "")
+			continue
+		}
 		if _, err := os.Lstat(p); err != nil {
 			continue
 		}
-		key := "~/" + rel
 		target, protected := e.linkTarget(p)
 		link := ""
 		if target != "" {
@@ -298,7 +327,7 @@ func shortHash(s string) string {
 }
 
 func gitConfig(e *Env, s *snapshot.Section) {
-	if e.Look("git") == "" {
+	if p := e.Look("git"); p == "" || e.stubWouldPrompt("git", p) {
 		s.Status, s.Note = snapshot.Absent, "git is not installed"
 		return
 	}
@@ -310,6 +339,9 @@ func gitConfig(e *Env, s *snapshot.Section) {
 	seen := map[string]int{}
 	for _, l := range Lines(out) {
 		k, v, _ := strings.Cut(l, "=")
+		// Split from its key, "github.token=abc" would no longer look like
+		// a secret to the redaction every value goes through later.
+		v = redact.Value(k[strings.LastIndex(k, ".")+1:], v)
 		seen[k]++
 		if seen[k] > 1 {
 			k += " #" + itoa(seen[k])
@@ -320,7 +352,13 @@ func gitConfig(e *Env, s *snapshot.Section) {
 
 func sshConfig(e *Env, s *snapshot.Section) {
 	dir := e.HomePath(".ssh")
-	if f, err := os.Open(filepath.Join(dir, "config")); err == nil {
+	if e.pathProtected(dir) {
+		s.Status, s.Note = snapshot.Unavailable, "~/.ssh links into a privacy-protected folder"
+		return
+	}
+	if _, protected := e.linkTarget(filepath.Join(dir, "config")); protected {
+		s.Add("config", "not read: linked into a privacy-protected folder", "")
+	} else if f, err := os.Open(filepath.Join(dir, "config")); err == nil {
 		var host string
 		var opts []string
 		flush := func() {
@@ -461,23 +499,41 @@ var devStubs = map[string]bool{
 }
 
 func (e *Env) stubWouldPrompt(name, path string) bool {
-	if e.OS != "darwin" || filepath.Dir(path) != "/usr/bin" {
+	if e.OS != "darwin" || (!devStubs[name] && name != "java" && name != "kotlin") {
 		return false
+	}
+	// A link elsewhere on PATH (~/bin/python3 -> /usr/bin/python3) is the
+	// same stub.
+	if filepath.Dir(path) != "/usr/bin" {
+		real, err := filepath.EvalSymlinks(path)
+		if err != nil || filepath.Dir(real) != "/usr/bin" {
+			return false
+		}
 	}
 	if name == "java" || name == "kotlin" {
 		entries, err := os.ReadDir(e.Sys("/Library/Java/JavaVirtualMachines"))
 		return err != nil || len(entries) == 0
 	}
-	if devStubs[name] {
+	cltMu.Lock()
+	defer cltMu.Unlock()
+	ok, known := cltFound[e.Path]
+	if !known {
 		out, err := e.Out("xcode-select", "-p")
-		if err != nil {
-			return true
+		if err == nil {
+			_, err = os.Stat(strings.TrimSpace(out))
 		}
-		_, err = os.Stat(strings.TrimSpace(out))
-		return err != nil
+		ok = err == nil
+		cltFound[e.Path] = ok
 	}
-	return false
+	return !ok
 }
+
+// cltFound caches, per PATH, whether the command line tools are installed;
+// every run of a /usr/bin developer tool asks.
+var (
+	cltMu    sync.Mutex
+	cltFound = map[string]bool{}
+)
 
 func runtimes(e *Env, s *snapshot.Section) {
 	type res struct{ key, value string }

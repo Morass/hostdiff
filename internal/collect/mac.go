@@ -1,9 +1,7 @@
 package collect
 
 import (
-	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -14,6 +12,7 @@ import (
 
 	"howett.net/plist"
 
+	"github.com/morass/hostdiff/internal/redact"
 	"github.com/morass/hostdiff/internal/snapshot"
 )
 
@@ -126,6 +125,10 @@ func mas(e *Env, s *snapshot.Section) {
 
 func apps(e *Env, s *snapshot.Section) {
 	add := func(bundle, key string) {
+		if e.pathProtected(bundle) {
+			s.Add(key, "not read: linked into a privacy-protected folder", "")
+			return
+		}
 		b, ok := ReadFile(filepath.Join(bundle, "Contents", "Info.plist"), 4<<20)
 		if !ok {
 			s.Add(key, "?", "")
@@ -147,6 +150,9 @@ func apps(e *Env, s *snapshot.Section) {
 		s.Add(key, version, detail)
 	}
 	scan := func(dir, prefix string) {
+		if e.pathProtected(dir) {
+			return
+		}
 		entries, err := os.ReadDir(dir)
 		if err != nil {
 			return
@@ -179,32 +185,18 @@ func shortcuts(e *Env, s *snapshot.Section) {
 		s.Status, s.Note = snapshot.Absent, "the shortcuts command is not available (macOS 12 or later)"
 		return
 	}
-	// Over ssh, touching ~/Library/Shortcuts can block forever inside the
-	// kernel while macOS decides on privacy access, so it is never looked at;
-	// an empty list there means "not readable", not "no shortcuts". Locally
-	// the check runs with a deadline.
-	if !e.SSH {
-		err, done := withDeadline(2*time.Second, func() error {
-			_, err := os.ReadDir(e.HomePath("Library", "Shortcuts"))
-			return err
-		})
-		if !done {
-			s.Status, s.Note = snapshot.Unavailable, "macOS privacy protection did not answer in this session"
-			return
-		}
-		if errors.Is(err, fs.ErrPermission) {
-			s.Status, s.Note = snapshot.Unavailable, "blocked by macOS privacy protection in this session"
-			return
-		}
-	}
+	// ~/Library/Shortcuts is never touched: opening it can raise a privacy
+	// prompt, and over ssh it can block forever in the kernel. The shortcuts
+	// tool returns an empty list, not an error, when the session may not
+	// read them (over ssh, from some terminals), so empty means unavailable.
 	out, err := e.Out("shortcuts", "list")
 	if err != nil {
 		s.Status, s.Note = snapshot.Failed, "shortcuts list: "+err.Error()
 		return
 	}
 	names := Lines(out)
-	if len(names) == 0 && e.SSH {
-		s.Status, s.Note = snapshot.Unavailable, "the shortcuts tool returns nothing over ssh"
+	if len(names) == 0 {
+		s.Status, s.Note = snapshot.Unavailable, "the shortcuts tool listed nothing: no shortcuts, or this session (ssh, a terminal without access) may not read them"
 		return
 	}
 	folderOf := map[string]string{}
@@ -227,7 +219,9 @@ func shortcuts(e *Env, s *snapshot.Section) {
 		if folder == "" {
 			folder = "(no folder)"
 		}
-		s.Add(n, folder, "")
+		// Names are free text: give them the full redaction values get.
+		name, _ := redact.Secrets(n)
+		s.Add(name, folder, "")
 	}
 }
 
@@ -322,6 +316,9 @@ func launchd(e *Env, s *snapshot.Section) {
 		{e.Sys("/Library/LaunchDaemons"), "daemon"},
 	}
 	for _, d := range dirs {
+		if e.pathProtected(d.dir) {
+			continue
+		}
 		entries, err := os.ReadDir(d.dir)
 		if err != nil {
 			continue

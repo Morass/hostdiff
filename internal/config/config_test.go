@@ -118,3 +118,31 @@ func TestMatchIgnore(t *testing.T) {
 		}
 	}
 }
+
+// Settings below a [machines.x] table belong to that table in TOML; they must
+// be refused, not silently ignored.
+func TestRejectsUnknownOrMisplacedSettings(t *testing.T) {
+	p := write(t, "[machines.laptop]\nssh = \"laptop\"\nskip = [\"fonts\"]\n", 0o600)
+	if _, err := Load(p); err == nil || !strings.Contains(err.Error(), "machines.laptop.skip") {
+		t.Fatalf("misplaced skip accepted: %v", err)
+	}
+}
+
+// Uncommenting every setting in the example must give a working config with
+// the global settings in effect.
+func TestExampleUncommentedWorks(t *testing.T) {
+	var lines []string
+	for _, l := range strings.Split(Example, "\n") {
+		if rest, ok := strings.CutPrefix(l, "# "); ok && (strings.HasPrefix(rest, "[") || strings.Contains(rest, " = ")) && !strings.Contains(rest, ". ") {
+			l = rest
+		}
+		lines = append(lines, l)
+	}
+	c, err := Load(write(t, strings.Join(lines, "\n"), 0o600))
+	if err != nil {
+		t.Fatalf("%v\n%s", err, strings.Join(lines, "\n"))
+	}
+	if len(c.Skip) != 1 || len(c.Ignore) != 2 || len(c.Machines) != 2 {
+		t.Fatalf("settings lost: %+v", c)
+	}
+}

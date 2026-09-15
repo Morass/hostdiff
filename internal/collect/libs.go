@@ -13,8 +13,12 @@ import (
 
 // pythonProbe lists every distribution an interpreter can import, marking
 // the ones in the user site. It needs no pip, works for Python 3.8+, and
-// reads nothing but package metadata.
-const pythonProbe = `import json, sys, site
+// reads nothing but package metadata. Its first line drops the current
+// folder from the import path, so a json.py lying in the home folder is
+// never imported (and run).
+const pythonProbe = `import sys
+sys.path[:] = [p for p in sys.path if p not in ("", ".")]
+import json, site
 v = "%d.%d" % sys.version_info[:2]
 try:
     import importlib.metadata as md
@@ -124,7 +128,7 @@ func libraries(e *Env, s *snapshot.Section) {
 		}
 	}
 
-	if out, err := e.Out("Rscript", "-e", `ip <- installed.packages(priority = "NA"); cat(paste(ip[, "Package"], ip[, "Version"], sep = "\t"), sep = "\n")`); err == nil {
+	if out, err := e.Out("Rscript", "--no-init-file", "-e", `ip <- installed.packages(priority = "NA"); cat(paste(ip[, "Package"], ip[, "Version"], sep = "\t"), sep = "\n")`); err == nil {
 		for _, l := range Lines(out) {
 			if name, v, ok := strings.Cut(l, "\t"); ok {
 				s.Add("R › "+name, v, "")
@@ -133,6 +137,9 @@ func libraries(e *Env, s *snapshot.Section) {
 	}
 
 	envs, _ := filepath.Glob(e.HomePath(".julia", "environments", "*", "Project.toml"))
+	if e.pathProtected(e.HomePath(".julia")) {
+		envs = nil
+	}
 	for _, p := range envs {
 		b, ok := ReadFile(p, 1<<20)
 		if !ok {

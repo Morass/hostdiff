@@ -77,9 +77,10 @@ func probeScript(m *config.Machine, args string) string {
 }
 
 // uploadScript receives a binary on stdin into a private temporary folder,
-// runs it once and removes it.
+// runs it once and removes it, also when the connection drops or the run is
+// interrupted (only SIGKILL or a crash of the machine leaves it behind).
 func uploadScript(args string) string {
-	return fmt.Sprintf(`umask 077; d=$(mktemp -d "${TMPDIR:-/tmp}/hostdiff.XXXXXX") || exit 1; cat > "$d/hostdiff" && chmod 700 "$d/hostdiff" && "$d/hostdiff" %s; rc=$?; rm -rf "$d"; exit $rc`, args)
+	return fmt.Sprintf(`umask 077; d=$(mktemp -d "${TMPDIR:-/tmp}/hostdiff.XXXXXX") || exit 1; hdclean() { rm -rf "$d"; }; trap hdclean EXIT; trap "exit 129" HUP; trap "exit 130" INT; trap "exit 143" TERM; cat > "$d/hostdiff" && chmod 700 "$d/hostdiff" && "$d/hostdiff" %s`, args)
 }
 
 func sshProgram(opt Options) string {
@@ -204,12 +205,14 @@ func parseMissing(stderr []byte) (goos, goarch string, ok bool) {
 // failure summarises a failed remote run without echoing secrets that a
 // remote login banner or error might contain.
 func failure(code int, stderr []byte) string {
-	msg := strings.TrimSpace(string(stderr))
-	lines := strings.Split(msg, "\n")
+	// Redact before cutting: a private key block cut below its BEGIN line
+	// no longer looks like one.
+	msg, _ := redact.Secrets(strings.TrimSpace(string(stderr)))
+	lines := strings.Split(snapshot.StripControls(msg), "\n")
 	if len(lines) > 6 {
 		lines = lines[len(lines)-6:]
 	}
-	msg, _ = redact.Secrets(strings.Join(lines, "\n"))
+	msg = strings.Join(lines, "\n")
 	if code == 255 {
 		return "ssh could not connect: " + msg
 	}

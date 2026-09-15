@@ -66,20 +66,40 @@ func Path() string {
 // result is an empty config with Found false.
 func Load(path string) (*Config, error) {
 	c := &Config{Path: path, Machines: map[string]*Machine{}}
-	st, err := os.Stat(path)
+	// Checked and decoded through one open file, so the file cannot be
+	// swapped between the permission check and the read.
+	f, err := os.Open(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return c, nil
 	}
 	if err != nil {
 		return nil, err
 	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !st.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a regular file", path)
+	}
 	// The file decides which commands run on remote machines, so like
 	// ~/.ssh/config it must not be writable by other users.
 	if st.Mode().Perm()&0o022 != 0 {
 		return nil, fmt.Errorf("%s is writable by other users (mode %o); run: chmod 600 %s", path, st.Mode().Perm(), path)
 	}
-	if _, err := toml.DecodeFile(path, c); err != nil {
+	md, err := toml.NewDecoder(f).Decode(c)
+	if err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	// A setting in the wrong place (skip = [...] below a [machines.x] table
+	// belongs to that machine) would otherwise be silently ignored.
+	if keys := md.Undecoded(); len(keys) > 0 {
+		var names []string
+		for _, k := range keys {
+			names = append(names, k.String())
+		}
+		return nil, fmt.Errorf("%s: unknown setting %s (ignore and skip go above the first [machines.NAME] table)", path, strings.Join(names, ", "))
 	}
 	c.Found = true
 	if c.Machines == nil {
@@ -144,6 +164,15 @@ const Example = `# hostdiff machines. This file holds no secrets: how to log in 
 # port, jump host) belongs in ~/.ssh/config, and hostdiff just runs
 # "ssh DESTINATION". Keep this file out of repositories.
 
+# Items to hide from every diff: "SECTION:GLOB" or "GLOB".
+# ignore = ["apps:Xcode*.app", "runtimes:docker"]
+
+# Sections never to collect (see: hostdiff sections).
+# skip = ["fonts"]
+
+# Machines. Keep them below the settings above: in TOML every line after a
+# machine's heading belongs to that machine.
+
 # A machine reached over ssh. DESTINATION is a Host alias from ~/.ssh/config
 # (recommended) or user@host.
 # [machines.laptop]
@@ -151,15 +180,9 @@ const Example = `# hostdiff machines. This file holds no secrets: how to log in 
 # command = "~/.local/bin/hostdiff"  # where hostdiff lives there (default: search)
 # upload = "auto"                     # send this binary for one run if missing: auto, always, never
 
-# The machine you are on. "local" always works too, this just gives it a name.
+# The machine you are on. "localhost" always works too, this just gives it a name.
 # [machines.desk]
 # local = true
-
-# Items to hide from every diff: "SECTION:GLOB" or "GLOB".
-# ignore = ["apps:Xcode*.app", "runtimes:docker"]
-
-# Sections never to collect (see: hostdiff sections).
-# skip = ["fonts"]
 `
 
 // WriteExample creates the config file with the example text. It refuses to

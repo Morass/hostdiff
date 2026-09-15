@@ -134,3 +134,48 @@ func TestShapes(t *testing.T) {
 		t.Errorf("token in key kept: %q", out)
 	}
 }
+
+func TestMoreSecretForms(t *testing.T) {
+	cases := []struct{ text, leak string }{
+		{"set -gx API_TOKEN opaque-fish-777", "opaque-fish"},
+		{"setenv GITHUB_TOKEN opaque-csh-778", "opaque-csh"},
+		{`user = "alice:opaque-curl-888"`, "opaque-curl"},
+		{"alias get='curl -u alice:opaque-curl-889 https://example.org'", "opaque-curl"},
+		{"PASSWORD=abc", "abc"},
+		{"export PASSWORD='$literal-password'", "literal-password"},
+		{"mysql --password opaque-flag-111 db", "opaque-flag"},
+		{"AUTH_TOKEN=opaque-auth-321", "opaque-auth"},
+		{"authorization_code=opaque-auth-322", "opaque-auth"},
+		{"<key>API_TOKEN</key>\n\t<string>opaque-env-555</string>", "opaque-env"},
+		{"<string>--password</string>\n\t\t<string>opaque-arg-999</string>", "opaque-arg"},
+	}
+	for _, c := range cases {
+		if out, n := Secrets(c.text); n == 0 || strings.Contains(out, c.leak) {
+			t.Errorf("not redacted (%d): %q -> %q", n, c.text, out)
+		}
+	}
+	for _, keep := range []string{
+		"set -gx EDITOR vim",
+		`export TOKEN="$GH_TOKEN"`,
+		"user = alice",
+		"password: no",
+		"<key>Label</key><string>com.example.agent</string>",
+		"git log --author=someone",
+		"git log --author someone",
+	} {
+		if out, n := Secrets(keep); n != 0 {
+			t.Errorf("plain text redacted: %q -> %q", keep, out)
+		}
+	}
+}
+
+func TestValue(t *testing.T) {
+	for name, want := range map[string]string{"token": "[REDACTED]", "password": "[REDACTED]", "helper": "v4lue-x", "name": "v4lue-x", "author": "v4lue-x"} {
+		if got := Value(name, "v4lue-x"); got != want {
+			t.Errorf("Value(%q) = %q", name, got)
+		}
+	}
+	if got := Value("token", "$GH_TOKEN"); got != "$GH_TOKEN" {
+		t.Errorf("placeholder redacted: %q", got)
+	}
+}

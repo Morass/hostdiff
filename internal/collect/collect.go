@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/user"
@@ -153,7 +154,7 @@ func (e *Env) OutAll(name string, args ...string) (string, error) {
 
 func (e *Env) run(both bool, name string, args ...string) (string, string, error) {
 	bin := e.Look(name)
-	if bin == "" {
+	if bin == "" || e.stubWouldPrompt(name, bin) {
 		return "", "", errNotFound
 	}
 	timeout := e.CmdTimeout
@@ -167,19 +168,22 @@ func (e *Env) run(both bool, name string, args ...string) (string, string, error
 	if st, err := os.Stat(e.Home); err == nil && st.IsDir() {
 		cmd.Dir = e.Home
 	}
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
+	stdout, stderr := &capped{max: maxOutput}, &capped{max: maxOutput}
+	cmd.Stdout = stdout
 	if both {
-		cmd.Stderr = &stdout
+		cmd.Stderr = stdout
 	} else {
-		cmd.Stderr = &stderr
+		cmd.Stderr = stderr
 	}
 	cmd.WaitDelay = 2 * time.Second
 	err := cmd.Run()
 	if ctx.Err() == context.DeadlineExceeded {
 		err = fmt.Errorf("%s timed out after %s", name, timeout)
 	}
-	return stdout.String(), stderr.String(), err
+	if stdout.over || stderr.over {
+		err = fmt.Errorf("%s printed more than %d MB", name, maxOutput>>20)
+	}
+	return stdout.buf.String(), stderr.buf.String(), err
 }
 
 func (e *Env) childEnv() []string {
@@ -202,15 +206,43 @@ func (e *Env) childEnv() []string {
 	return env
 }
 
-// ReadFile reads a file up to limit bytes; ok is false if it is missing,
-// unreadable or larger than the limit.
+// maxOutput bounds what one external command may print.
+const maxOutput = 64 << 20
+
+// capped is a buffer that stops accepting writes past max bytes, which ends
+// the command with a broken pipe instead of filling memory.
+type capped struct {
+	buf  bytes.Buffer
+	max  int
+	over bool
+}
+
+func (c *capped) Write(p []byte) (int, error) {
+	if c.buf.Len()+len(p) > c.max {
+		c.over = true
+		return 0, errors.New("output limit reached")
+	}
+	return c.buf.Write(p)
+}
+
+// ReadFile reads a regular file up to limit bytes; ok is false if it is
+// missing, unreadable, larger than the limit or not a regular file (a FIFO
+// would block the open forever, a device would never end).
 func ReadFile(p string, limit int64) ([]byte, bool) {
 	st, err := os.Stat(p)
-	if err != nil || st.IsDir() || st.Size() > limit {
+	if err != nil || !st.Mode().IsRegular() || st.Size() > limit {
 		return nil, false
 	}
-	b, err := os.ReadFile(p)
-	return b, err == nil
+	f, err := os.Open(p)
+	if err != nil {
+		return nil, false
+	}
+	defer f.Close()
+	b, err := io.ReadAll(io.LimitReader(f, limit+1))
+	if err != nil || int64(len(b)) > limit {
+		return nil, false
+	}
+	return b, true
 }
 
 // Lines splits output into trimmed, non-empty lines.
@@ -308,7 +340,7 @@ func clean(e *Env, sec *snapshot.Section) {
 		if homeRe != nil {
 			s = homeRe.ReplaceAllString(s, "~$1")
 		}
-		return strings.ToValidUTF8(s, "?")
+		return snapshot.StripControls(strings.ToValidUTF8(s, "?"))
 	}
 	text := func(s string) string {
 		s, _ = redact.Secrets(s)
@@ -374,18 +406,4 @@ func Kinds() []string {
 	}
 	sort.Strings(out)
 	return out
-}
-
-// withDeadline runs f and gives up waiting after d. A filesystem call that
-// macOS holds for a privacy decision cannot be cancelled, so the goroutine is
-// left behind; it ends with the process.
-func withDeadline(d time.Duration, f func() error) (err error, done bool) {
-	ch := make(chan error, 1)
-	go func() { ch <- f() }()
-	select {
-	case err = <-ch:
-		return err, true
-	case <-time.After(d):
-		return nil, false
-	}
 }

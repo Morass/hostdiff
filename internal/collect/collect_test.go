@@ -1,9 +1,14 @@
 package collect
 
 import (
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -183,12 +188,14 @@ esac`)
 	}
 }
 
-func TestShortcutsOverSSHIsUnavailableNotEmpty(t *testing.T) {
+func TestShortcutsEmptyListIsUnavailableNotEmpty(t *testing.T) {
 	e := sandbox(t)
 	stub(t, e, "shortcuts", `exit 0`)
-	e.SSH = true
-	if s := section(t, e, "shortcuts"); s.Status != snapshot.Unavailable {
-		t.Fatalf("empty list over ssh reported as %s", s.Status)
+	for _, ssh := range []bool{true, false} {
+		e.SSH = ssh
+		if s := section(t, e, "shortcuts"); s.Status != snapshot.Unavailable {
+			t.Fatalf("empty list (ssh %v) reported as %s", ssh, s.Status)
+		}
 	}
 	stub(t, e, "shortcuts", `[ "$2" = "--folders" ] && { echo Work; exit 0; }
 [ "$2" = "--folder-name" ] && { echo "Start timer"; exit 0; }
@@ -201,6 +208,20 @@ printf 'Start timer\nResize image\n'`)
 
 func TestStubsThatWouldOpenDialogsAreNotRun(t *testing.T) {
 	e := sandbox(t)
+	// A link on PATH to a /usr/bin stub is the same stub.
+	if _, err := os.Stat("/usr/bin/java"); err == nil && runtime.GOOS == "darwin" {
+		link := filepath.Join(e.Path, "java")
+		if err := os.Symlink("/usr/bin/java", link); err != nil {
+			t.Fatal(err)
+		}
+		if !e.stubWouldPrompt("java", link) {
+			t.Error("link to the java stub would be run")
+		}
+		if _, err := e.Out("java", "-version"); err == nil {
+			t.Error("Out ran the java stub")
+		}
+		os.Remove(link)
+	}
 	if !e.stubWouldPrompt("java", "/usr/bin/java") {
 		t.Error("java stub without a JDK would be run")
 	}
@@ -259,33 +280,143 @@ func TestProtectedFolderCaseInsensitive(t *testing.T) {
 	}
 }
 
-func TestWithDeadline(t *testing.T) {
-	block := make(chan struct{})
-	defer close(block)
-	start := time.Now()
-	if _, done := withDeadline(50*time.Millisecond, func() error { <-block; return nil }); done || time.Since(start) > time.Second {
-		t.Fatal("a blocked call was waited for")
-	}
-	if err, done := withDeadline(time.Second, func() error { return os.ErrPermission }); !done || err != os.ErrPermission {
-		t.Fatalf("fast call: %v %v", err, done)
-	}
-}
-
-// Over ssh the Shortcuts folder must not be touched at all: here it is a
-// folder the test cannot read, and an empty answer still means unavailable.
-func TestShortcutsOverSSHNeverReadsTheFolder(t *testing.T) {
+// The Shortcuts folder must not be touched at all, locally or over ssh
+// (privacy prompt, or a read that blocks forever): here it is a folder the
+// test cannot read, which must not matter.
+func TestShortcutsNeverReadsTheFolder(t *testing.T) {
 	e := sandbox(t)
 	stub(t, e, "shortcuts", `printf 'Timer\n'`)
-	e.SSH = true
 	dir := e.HomePath("Library", "Shortcuts")
 	writeFile(t, filepath.Join(dir, "x"), "", 0o644)
 	if err := os.Chmod(dir, 0o000); err != nil {
 		t.Fatal(err)
 	}
 	defer os.Chmod(dir, 0o755)
-	s := section(t, e, "shortcuts")
-	if s.Status != snapshot.OK || find(s, "Timer") == nil {
-		t.Fatalf("over ssh the folder permission must not matter: %+v", s)
+	for _, ssh := range []bool{true, false} {
+		e.SSH = ssh
+		s := section(t, e, "shortcuts")
+		if s.Status != snapshot.OK || find(s, "Timer") == nil {
+			t.Fatalf("ssh %v: the folder permission must not matter: %+v", ssh, s)
+		}
+	}
+}
+
+// Values split from their names (git config --list) and plist key/string
+// pairs lose the key=value shape the text redaction looks for.
+func TestSplitAndStructuredSecretsRedacted(t *testing.T) {
+	e := sandbox(t)
+	stub(t, e, "git", `printf 'user.name=Someone\ngithub.token=opaque-value-12345\ncredential.https://example.com.password=s3cretpass\ncredential.helper=osxkeychain\n'`)
+	g := section(t, e, "git")
+	if it := find(g, "github.token"); it == nil || it.Value != "[REDACTED]" {
+		t.Errorf("git token: %+v", g.Items)
+	}
+	if it := find(g, "credential.https://example.com.password"); it == nil || it.Value != "[REDACTED]" {
+		t.Errorf("git password: %+v", g.Items)
+	}
+	if it := find(g, "credential.helper"); it == nil || it.Value != "osxkeychain" {
+		t.Errorf("harmless git value redacted: %+v", g.Items)
+	}
+
+	writeFile(t, e.HomePath("Library", "LaunchAgents", "x.test.plist"), `<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict><key>Label</key><string>x.test</string><key>ProgramArguments</key><array><string>/bin/echo</string><string>--password</string><string>opaque-arg-999</string></array><key>EnvironmentVariables</key><dict><key>API_TOKEN</key><string>opaque-env-555</string></dict></dict></plist>`, 0o644)
+	l := section(t, e, "launchd")
+	it := find(l, "user agent › x.test")
+	if it == nil || strings.Contains(it.Detail+it.Value, "opaque-") || !strings.Contains(it.Detail, "API_TOKEN") {
+		t.Errorf("launchd plist secrets: %+v", l.Items)
+	}
+
+	e2 := sandbox(t)
+	stub(t, e2, "shortcuts", `printf 'Resize image\nTOKEN=opaque-name-4242\n'`)
+	if s := section(t, e2, "shortcuts"); find(s, "Resize image") == nil || strings.Contains(fmt.Sprint(s.Items), "opaque-name") {
+		t.Errorf("shortcut names: %+v", s.Items)
+	}
+}
+
+// Terminal control characters collected from a machine never reach a
+// snapshot, where a terminal would later interpret them.
+func TestControlCharactersStripped(t *testing.T) {
+	e := sandbox(t)
+	stub(t, e, "brew", `case "$1 $2" in
+"list --formula") printf 'evil\033[2J\r 1.0\n';;
+esac`)
+	writeFile(t, e.HomePath(".zshrc"), "alias x='echo \033]0;title\007'\n", 0o644)
+	s := Snapshot(e, Options{Only: []string{"brew", "dotfiles"}})
+	for _, sec := range s.Sections {
+		for _, it := range sec.Items {
+			if strings.ContainsAny(it.Key+it.Value+it.Detail+it.Tag, "\x1b\r\x07") {
+				t.Errorf("%s: control character kept in %q", sec.Kind, it)
+			}
+		}
+	}
+}
+
+// A FIFO where a dotfile belongs would block the open forever.
+func TestReadFileSkipsSpecialFiles(t *testing.T) {
+	e := sandbox(t)
+	p := e.HomePath(".hushlogin")
+	if err := syscall.Mkfifo(p, 0o644); err != nil {
+		t.Skip("mkfifo:", err)
+	}
+	done := make(chan snapshot.Section, 1)
+	go func() { done <- section(t, e, "dotfiles") }()
+	select {
+	case s := <-done:
+		if it := find(s, "~/.hushlogin"); it == nil || !strings.HasPrefix(it.Value, "unreadable") {
+			t.Errorf("fifo: %+v", s.Items)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("dotfiles blocked on a FIFO")
+	}
+	if _, ok := ReadFile(p, 10); ok {
+		t.Error("ReadFile accepted a FIFO")
+	}
+	big := e.HomePath("big")
+	writeFile(t, big, strings.Repeat("x", 100), 0o644)
+	if _, ok := ReadFile(big, 10); ok {
+		t.Error("ReadFile ignored the limit")
+	}
+}
+
+// A folder on the way that links into Documents is as protected as a link
+// on the file itself: even stat'ing a path through it can raise a prompt.
+func TestParentFolderLinkedIntoProtectedFolder(t *testing.T) {
+	e := sandbox(t)
+	writeFile(t, e.HomePath("Documents", "cfg", "fish", "config.fish"), "set -gx EDITOR vim\n", 0o644)
+	if err := os.Symlink(e.HomePath("Documents", "cfg"), e.HomePath(".config")); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, e.HomePath("Documents", "ssh", "config"), "Host x\n", 0o644)
+	if err := os.Symlink(e.HomePath("Documents", "ssh"), e.HomePath(".ssh")); err != nil {
+		t.Fatal(err)
+	}
+	s := section(t, e, "dotfiles")
+	it := find(s, "~/.config/fish/config.fish")
+	if it == nil || it.Detail != "" || !strings.HasPrefix(it.Value, "not read") {
+		t.Errorf("file under a protected parent link was read: %+v", s.Items)
+	}
+	if sh := section(t, e, "ssh"); sh.Status != snapshot.Unavailable || len(sh.Items) != 0 {
+		t.Errorf("ssh folder linked into Documents was read: %+v", sh)
+	}
+}
+
+// python -c puts the current folder (the home folder) first on the import
+// path; a json.py there must not be imported, which would run it.
+func TestPythonProbeIgnoresModulesInHome(t *testing.T) {
+	py, err := exec.LookPath("python3")
+	if err != nil || filepath.Dir(py) == "/usr/bin" {
+		t.Skip("no python3 outside /usr/bin")
+	}
+	e := sandbox(t)
+	e.OS = "linux" // no stub checks for the real interpreter
+	stub(t, e, "python3", `exec `+py+` "$@"`)
+	marker := filepath.Join(t.TempDir(), "ran")
+	writeFile(t, e.HomePath("json.py"), "open("+strconv.Quote(marker)+", 'w').write('x')\n", 0o644)
+	out, err := e.Out("python3", "-E", "-c", pythonProbe)
+	if err != nil || !strings.Contains(out, `"pkgs"`) {
+		t.Fatalf("probe failed: %v %s", err, out)
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("json.py from the home folder was imported")
 	}
 }
 

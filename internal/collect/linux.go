@@ -80,6 +80,7 @@ func systemd(e *Env, s *snapshot.Section) {
 		s.Status, s.Note = snapshot.Absent, "systemctl not found"
 		return
 	}
+	failures := 0
 	for _, scope := range []struct {
 		label string
 		args  []string
@@ -89,6 +90,10 @@ func systemd(e *Env, s *snapshot.Section) {
 	} {
 		out, err := e.Out("systemctl", scope.args...)
 		if err != nil {
+			failures++
+			if failures == 2 {
+				s.Status, s.Note = snapshot.Failed, "systemctl list-unit-files: "+err.Error()
+			}
 			continue
 		}
 		for _, l := range Lines(out) {

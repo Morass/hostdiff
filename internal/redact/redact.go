@@ -49,20 +49,42 @@ var (
 	email      = regexp.MustCompile(`\b[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}\b`)
 	sshHost    = regexp.MustCompile(`(?im)^(\s*(?:HostName|User|IdentityFile|ProxyJump)\s+)(\S+)`)
 	otherHome  = regexp.MustCompile(`(/(?:Users|home)/)([^/\s"':]+)`)
+
+	// fish `set -gx API_TOKEN value`, csh `setenv API_TOKEN value`.
+	setVar = regexp.MustCompile(`(?im)(\b(?:set(?:\s+-[A-Za-z-]+)*|setenv)\s+[A-Za-z0-9_]*` + secretWord + `[A-Za-z0-9_]*\s+)("[^"\n]*"|'[^'\n]*'|[^\s"';]+)`)
+	// curl's `user = "name:password"`, `-u name:password`, `--proxy-user`.
+	userPass = regexp.MustCompile(`(?im)((?:^|\s)(?:-u|-U|--user|--proxy-user|user|proxy-user)(?:\s*=\s*|\s+)["']?[^:\s"'=]+:)([^\s"']+)`)
+	// A value after a secret-named flag: `--password value`, and the same
+	// pair as consecutive plist array strings (launchd ProgramArguments).
+	flagValue = regexp.MustCompile(`(?i)((?:^|[\s>"'])-{1,2}[A-Za-z0-9_-]*` + secretWord + `[A-Za-z0-9_-]*(?:"|')?(?:</string>\s*<string>|\s+))("[^"\n]*"|'[^'\n]*'|[^\s"'<]+)`)
+	// <key>API_TOKEN</key><string>value</string> in a plist.
+	plistValue = regexp.MustCompile(`(?i)(<key>[^<]*` + secretWord + `[^<]*</key>\s*<string>)([^<]*)(</string>)`)
+	secretName = regexp.MustCompile(`(?i)^[A-Za-z0-9_-]*` + secretWord + `[A-Za-z0-9_-]*$`)
+	// "auth" also starts author and authority; a name secret only because of
+	// that is not one (authorization still is).
+	authorWord = regexp.MustCompile(`(?i)author(?:s|ity|ities|ed|ing)?([^A-Za-z]|$)`)
+	anySecret  = regexp.MustCompile(`(?i)` + secretWord)
 )
+
+// namesSecret reports whether a matched name really is secret-named.
+func namesSecret(name string) bool {
+	return anySecret.MatchString(authorWord.ReplaceAllString(name, "$1"))
+}
 
 // Placeholder values are not secrets; skipping them keeps shell files that
 // only reference a variable (export TOKEN="$GH_TOKEN") diffable.
 func placeholder(v string) bool {
+	// In single quotes a shell does not expand $, so '$x' is a literal.
+	literal := strings.HasPrefix(v, "'")
 	v = strings.Trim(v, `"'`)
-	if v == "" || len(v) < 4 {
+	if len(v) < 3 {
 		return true
 	}
-	if strings.HasPrefix(v, "$") || strings.HasPrefix(v, "${") || strings.HasPrefix(v, "<") || strings.HasPrefix(v, "%") || strings.HasPrefix(v, "[REDACTED") {
+	if (!literal && strings.HasPrefix(v, "$")) || strings.HasPrefix(v, "<") || strings.HasPrefix(v, "%") || strings.HasPrefix(v, "[REDACTED") {
 		return true
 	}
 	switch strings.ToLower(v) {
-	case "true", "false", "none", "null", "changeme", "example", "xxxx", "your-token-here":
+	case "true", "false", "yes", "off", "nil", "none", "null", "changeme", "example", "xxxx", "your-token-here":
 		return true
 	}
 	return false
@@ -131,7 +153,7 @@ func Secrets(s string) (string, int) {
 	})
 	s = assignment.ReplaceAllStringFunc(s, func(m string) string {
 		sub := assignment.FindStringSubmatch(m)
-		if placeholder(sub[2]) {
+		if placeholder(sub[2]) || !namesSecret(sub[1]) {
 			return m
 		}
 		n++
@@ -145,7 +167,36 @@ func Secrets(s string) (string, int) {
 		n++
 		return sub[1] + "[REDACTED]"
 	})
+	for _, re := range []*regexp.Regexp{setVar, userPass, flagValue} {
+		s = re.ReplaceAllStringFunc(s, func(m string) string {
+			sub := re.FindStringSubmatch(m)
+			if placeholder(sub[2]) || strings.HasPrefix(sub[2], "-") || (re != userPass && !namesSecret(sub[1])) {
+				return m
+			}
+			n++
+			return sub[1] + "[REDACTED]"
+		})
+	}
+	s = plistValue.ReplaceAllStringFunc(s, func(m string) string {
+		sub := plistValue.FindStringSubmatch(m)
+		if placeholder(sub[2]) {
+			return m
+		}
+		n++
+		return sub[1] + "[REDACTED]" + sub[3]
+	})
 	return s, n
+}
+
+// Value returns value, or [REDACTED] when name (a setting or variable name
+// without its value, such as the last part of a git config key) says it
+// holds a secret. It is for values that were split from their names before
+// Secrets could see the pair.
+func Value(name, value string) string {
+	if secretName.MatchString(name) && namesSecret(name) && !placeholder(value) {
+		return "[REDACTED]"
+	}
+	return value
 }
 
 // Text returns s with secrets replaced by [REDACTED], e-mail addresses,

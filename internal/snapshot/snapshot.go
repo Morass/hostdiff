@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -101,12 +102,51 @@ func (s *Section) Sort() {
 	s.Items = out
 }
 
-// Read decodes a snapshot and checks its format.
+// MaxBytes bounds a snapshot read from a file or another machine.
+const MaxBytes = 256 << 20
+
+// StripControls removes terminal control characters (escape sequences,
+// carriage returns, C1 controls) and keeps newlines and tabs. Snapshots can
+// come from another machine or a file someone sent, and their text ends up
+// in a terminal.
+func StripControls(s string) string {
+	if strings.IndexFunc(s, isControl) < 0 {
+		return s
+	}
+	return strings.Map(func(r rune) rune {
+		if isControl(r) {
+			return -1
+		}
+		return r
+	}, s)
+}
+
+func isControl(r rune) bool {
+	return (r < 0x20 && r != '\n' && r != '\t') || (r >= 0x7f && r <= 0x9f)
+}
+
+// Sanitize strips control characters from every text field.
+func (s *Snapshot) Sanitize() {
+	for _, p := range []*string{&s.Tool, &s.Host.Name, &s.Host.OS, &s.Host.Arch} {
+		*p = StripControls(*p)
+	}
+	for i := range s.Sections {
+		sec := &s.Sections[i]
+		sec.Kind, sec.Title, sec.Note = StripControls(sec.Kind), StripControls(sec.Title), StripControls(sec.Note)
+		sec.Status = Status(StripControls(string(sec.Status)))
+		for j := range sec.Items {
+			it := &sec.Items[j]
+			it.Key, it.Value, it.Detail, it.Tag = StripControls(it.Key), StripControls(it.Value), StripControls(it.Detail), StripControls(it.Tag)
+		}
+	}
+}
+
+// Read decodes a snapshot, checks its format and strips control characters.
 func Read(r io.Reader) (*Snapshot, error) {
 	var s Snapshot
-	dec := json.NewDecoder(r)
+	dec := json.NewDecoder(io.LimitReader(r, MaxBytes))
 	if err := dec.Decode(&s); err != nil {
-		return nil, fmt.Errorf("not a hostdiff snapshot: %w", err)
+		return nil, fmt.Errorf("not a hostdiff snapshot (or larger than %d MB): %w", MaxBytes>>20, err)
 	}
 	if s.Format == 0 {
 		return nil, fmt.Errorf("not a hostdiff snapshot: no format field")
@@ -114,6 +154,7 @@ func Read(r io.Reader) (*Snapshot, error) {
 	if s.Format != Format {
 		return nil, fmt.Errorf("snapshot format %d is not supported by this hostdiff (format %d); use the same version on both machines", s.Format, Format)
 	}
+	s.Sanitize()
 	return &s, nil
 }
 

@@ -123,6 +123,11 @@ machines:
 ```toml
 # ~/.config/hostdiff/config.toml  (mode 600, never in a repository)
 
+ignore = ["apps:Xcode*.app", "runtimes:docker"]   # SECTION:GLOB or GLOB
+skip = ["fonts"]                                   # never collect these
+
+# Machines come after the settings: in TOML every line after a
+# [machines.NAME] heading belongs to that machine.
 [machines.laptop]
 ssh = "laptop"            # a Host alias from ~/.ssh/config, or user@host
 
@@ -133,13 +138,12 @@ upload = "never"                    # auto (default), always or never
 
 [machines.desk]
 local = true              # this machine, by name
-
-ignore = ["apps:Xcode*.app", "runtimes:docker"]   # SECTION:GLOB or GLOB
-skip = ["fonts"]                                   # never collect these
 ```
 
-The config file is refused when other users can write to it, and `ssh` values
-that look like options (`-oProxyCommand=…`) or contain spaces are rejected.
+The config file is refused when other users can write to it or when it has a
+setting hostdiff does not know (such as `skip` placed under a machine), and
+`ssh` values that look like options (`-oProxyCommand=…`) or contain spaces are
+rejected.
 
 When hostdiff is not installed on the other machine and it runs the same
 operating system and architecture, `upload = "auto"` streams this binary over
@@ -180,7 +184,8 @@ hostdiff sections              what hostdiff collects
 hostdiff help COMMAND          help for one command
 ```
 
-`diff` exits 0 when nothing differs, 1 when something does and 2 on error, so
+`diff` exits 0 when nothing differs, 1 when something does and 2 on error
+(including when no section could be read on both sides), so
 it can guard scripts: `hostdiff diff golden.json --only brew --format text`.
 
 ## Safety and privacy
@@ -191,19 +196,25 @@ hostdiff only reads. The generated script is printed, never run.
   redaction step on the machine being collected, before it is written to a
   snapshot or sent over ssh: private key blocks, known token formats (GitHub,
   AWS, Slack, OpenAI, Anthropic, npm, Google, Stripe, JWTs), passwords in URLs,
-  authorization headers and literal values assigned to names like `TOKEN` or
-  `PASSWORD`. Files that hold credentials by design (`.netrc`, `.npmrc`,
+  authorization headers, `user:password` pairs, and literal values given to
+  names like `TOKEN` or `PASSWORD` (in `NAME=value`, `set -x NAME value`,
+  `--password value`, git config keys and plist dictionaries). Redaction
+  works on recognisable shapes, so review a snapshot before you share it. Files that hold credentials by design (`.netrc`, `.npmrc`,
   `.env`, cloud credential files) are not read at all, and private SSH keys
   are only listed by name.
+- **Snapshots from elsewhere are untrusted.** Terminal control characters are
+  removed from anything read from a file or another machine, and snapshots
+  larger than 256 MB are refused.
 - **Snapshots are still personal.** They contain host names, git identity,
   ssh host entries and dotfile contents. They are written with mode 600;
   keep them to yourself.
 - **No privacy dialogs.** macOS asks for permission when a program opens files
   in protected folders (Documents, Desktop, iCloud Drive, other apps' data).
-  hostdiff never follows a dotfile link into those folders, reads app shortcuts
-  only through `defaults` for the apps System Settings lists, and does not run
-  the `/usr/bin` stubs that would open an "install developer tools" or "install
-  Java" window.
+  hostdiff never opens a path that is in one of those folders or passes through
+  a link into one, never opens `~/Library/Shortcuts` (it asks the `shortcuts`
+  tool), reads app shortcuts only through `defaults` for the apps System
+  Settings lists, and does not run the `/usr/bin` stubs that would open an
+  "install developer tools" or "install Java" window.
 - **The remote command is fixed.** Only validated section names are passed to
   the other machine; nothing from the config reaches its shell unchecked, and
   names coming back in a snapshot are validated and quoted before they appear
@@ -212,7 +223,8 @@ hostdiff only reads. The generated script is printed, never run.
 ## Limits
 
 - **Shortcuts over ssh.** macOS only lets the logged-in session list
-  Shortcuts, so over ssh the section is reported as not compared. Run
+  Shortcuts; elsewhere the `shortcuts` tool lists nothing, so an empty list
+  is reported as not compared (also on a Mac that really has none). Run
   `hostdiff snap -o FILE` in Terminal on that Mac and compare the file.
 - **Login items** (System Settings › General › Login Items) need either
   Automation permission or root to read and are not collected yet.
