@@ -71,12 +71,18 @@ func Current() *Env {
 		// Test sandbox: only the PATH it was given.
 		return e
 	}
-	// Non-interactive ssh sessions often start with a minimal PATH; add the
-	// usual install folders so the same tools are found as in a terminal.
-	for _, d := range []string{"/opt/homebrew/bin", "/opt/homebrew/sbin", "/usr/local/bin", "/home/linuxbrew/.linuxbrew/bin", filepath.Join(home, ".local", "bin"), filepath.Join(home, ".cargo", "bin"), filepath.Join(home, "go", "bin")} {
+	// Non-interactive ssh sessions start with a minimal PATH (/usr/bin first).
+	// Put the usual install folders in front, as a terminal's startup files
+	// do, so the same tools are found; otherwise /usr/bin developer stubs
+	// win over Homebrew's copies and can hang over ssh.
+	var front []string
+	for _, d := range []string{filepath.Join(home, ".local", "bin"), "/opt/homebrew/bin", "/opt/homebrew/sbin", "/usr/local/bin", "/home/linuxbrew/.linuxbrew/bin", filepath.Join(home, ".cargo", "bin"), filepath.Join(home, "go", "bin")} {
 		if !pathHas(e.Path, d) {
-			e.Path += string(os.PathListSeparator) + d
+			front = append(front, d)
 		}
+	}
+	if len(front) > 0 {
+		e.Path = strings.Join(front, string(os.PathListSeparator)) + string(os.PathListSeparator) + e.Path
 	}
 	return e
 }
