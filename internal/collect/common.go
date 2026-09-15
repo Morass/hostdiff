@@ -583,6 +583,7 @@ func packages(e *Env, s *snapshot.Section) {
 			}
 		}
 	}
+	morePackages(e, s)
 	if out, err := e.Out("gh", "extension", "list"); err == nil {
 		for _, l := range Lines(out) {
 			if f := strings.Split(l, "\t"); len(f) >= 2 {

@@ -125,6 +125,120 @@ func install(sc *script, kind, key, value, tag string) {
 			prefixed("vscodium › ", "codium --install-extension %s")
 	case "defaults":
 		writeDefault(sc, key, value, tag)
+	case "libraries":
+		installLibrary(sc, key, tag)
+	case "toolchains":
+		installToolchain(sc, key)
+	}
+}
+
+var (
+	pyLabelRe   = regexp.MustCompile(`^python3\.[0-9]{1,2}$`)
+	rNameRe     = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9.]{0,100}$`)
+	juliaNameRe = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_]{0,100}$`)
+	perlNameRe  = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_]*(::[A-Za-z0-9_]+)*$`)
+	versionRe   = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+-]{0,60}$`)
+)
+
+func installLibrary(sc *script, key, tag string) {
+	label, name, ok := strings.Cut(key, " › ")
+	if !ok {
+		return
+	}
+	switch {
+	case pyLabelRe.MatchString(label):
+		if !pkgRe.MatchString(name) {
+			sc.skip("libraries", key, "unusual characters")
+		} else if tag == "user" {
+			sc.add("%s -m pip install --user %s", label, Quote(name))
+		} else {
+			sc.add("# %s: %s is installed system-wide there; install it the way that interpreter is managed", comment(label), comment(name))
+		}
+	case label == "gem":
+		if tag == "default" {
+			return // ships with Ruby
+		}
+		if pkgRe.MatchString(name) {
+			sc.add("gem install %s", Quote(name))
+		} else {
+			sc.skip("libraries", key, "unusual characters")
+		}
+	case label == "perl":
+		if perlNameRe.MatchString(name) {
+			sc.add("cpanm %s", Quote(name))
+		} else {
+			sc.skip("libraries", key, "unusual characters")
+		}
+	case label == "composer":
+		if pkgRe.MatchString(name) {
+			sc.add("composer global require %s", Quote(name))
+		} else {
+			sc.skip("libraries", key, "unusual characters")
+		}
+	case label == "R":
+		if rNameRe.MatchString(name) {
+			sc.add(`Rscript -e "install.packages('%s')"`, name)
+		} else {
+			sc.skip("libraries", key, "unusual characters")
+		}
+	case strings.HasPrefix(label, "julia "):
+		if juliaNameRe.MatchString(name) {
+			sc.add(`julia -e 'using Pkg; Pkg.add("%s")'`, name)
+		} else {
+			sc.skip("libraries", key, "unusual characters")
+		}
+	case label == "luarocks":
+		if pkgRe.MatchString(name) {
+			sc.add("luarocks install %s", Quote(name))
+		} else {
+			sc.skip("libraries", key, "unusual characters")
+		}
+	case label == "dart":
+		if pkgRe.MatchString(name) {
+			sc.add("dart pub global activate %s", Quote(name))
+		} else {
+			sc.skip("libraries", key, "unusual characters")
+		}
+	}
+}
+
+func installToolchain(sc *script, key string) {
+	label, name, ok := strings.Cut(key, " › ")
+	if !ok {
+		return
+	}
+	fields := strings.Fields(name)
+	valid := len(fields) > 0
+	for _, f := range fields {
+		valid = valid && versionRe.MatchString(f)
+	}
+	if !valid {
+		sc.skip("toolchains", key, "unusual characters")
+		return
+	}
+	switch label {
+	case "pyenv":
+		sc.add("pyenv install %s", Quote(name))
+	case "rbenv":
+		sc.add("rbenv install %s", Quote(name))
+	case "rustup":
+		sc.add("rustup toolchain install %s", Quote(name))
+	case "rustup component":
+		sc.add("# rustup component add … for %s (the name includes the target)", comment(name))
+	case "asdf":
+		if len(fields) == 2 {
+			sc.add("asdf install %s %s", Quote(fields[0]), Quote(fields[1]))
+		}
+	case "mise":
+		if len(fields) == 2 {
+			sc.add("mise install %s", Quote(fields[0]+"@"+fields[1]))
+		}
+	case "uv python":
+		sc.add("uv python install %s", Quote(name))
+	case "nvm":
+		sc.add("# nvm install %s  (nvm is a shell function; run it in your shell)", comment(name))
+	default:
+		sc.add("# %s: %s is installed there", comment(label), comment(name))
 	}
 }
 

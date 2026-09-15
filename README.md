@@ -102,7 +102,9 @@ Dotfiles  2 differ · 5 same
 | `git` | ✓ | ✓ | `git config --global` |
 | `ssh` | ✓ | ✓ | `~/.ssh/config` host entries, public key fingerprints, which private keys exist |
 | `runtimes` | ✓ | ✓ | versions and locations of about 50 runtimes and tools (node, python, go, java, docker, …) |
-| `packages` | ✓ | ✓ | npm -g, pipx, uv tools, cargo installs, go binaries, gh extensions |
+| `packages` | ✓ | ✓ | npm, pnpm and yarn globals, pipx, uv tools, cargo installs, go binaries, deno, dotnet tools, gh extensions |
+| `libraries` | ✓ | ✓ | Python packages for every interpreter found (python3 and side-by-side python3.X, marked user or system), Ruby gems, Perl CPAN modules, Composer global, R packages, Julia environments, LuaRocks, Dart pub global |
+| `toolchains` | ✓ | ✓ | versions installed by pyenv, rbenv, nvm, fnm, volta, rvm, asdf, mise, rustup (toolchains and components), Go SDKs, JDKs, SDKMAN, .NET SDKs and runtimes, conda environments, uv-managed Pythons |
 | `editors` | ✓ | ✓ | VS Code, Cursor and VSCodium extensions, Vim, Neovim and tmux plugins |
 | `fonts` | ✓ | ✓ | user and system fonts |
 | `cron` | ✓ | ✓ | the user's crontab |

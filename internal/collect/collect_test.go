@@ -288,3 +288,71 @@ func TestShortcutsOverSSHNeverReadsTheFolder(t *testing.T) {
 		t.Fatalf("over ssh the folder permission must not matter: %+v", s)
 	}
 }
+
+func TestLibraries(t *testing.T) {
+	e := sandbox(t)
+	stub(t, e, "python3", `echo '{"v": "3.12", "pkgs": [["requests", "2.32.3", "user"], ["pip", "24.0", "system"]]}'`)
+	stub(t, e, "gem", `printf 'rake (13.2.1)\njson (default: 2.7.1)\nminitest (5.20.0, default: 5.16.3)\n'`)
+	stub(t, e, "perl", `printf 'Moose\t2.2206\n'`)
+	stub(t, e, "composer", `echo '{"installed":[{"name":"laravel/installer","version":"v5.8.0"}]}'`)
+	stub(t, e, "Rscript", `printf 'dplyr\t1.1.4\n'`)
+	stub(t, e, "luarocks", `printf 'lpeg\t1.1.0-1\tinstalled\t/usr/local/lib/luarocks/rocks\n'`)
+	writeFile(t, e.HomePath(".julia", "environments", "v1.10", "Project.toml"), "[deps]\nPlots = \"91a5bcdd-55d7-5caf-9e0b-520d859cae80\"\n\n[compat]\nPlots = \"1\"\n", 0o644)
+	s := section(t, e, "libraries")
+	for key, want := range map[string]string{
+		"python3.12 › requests": "2.32.3/user",
+		"python3.12 › pip":      "24.0/system",
+		"gem › rake":            "13.2.1/",
+		"gem › json":            "2.7.1/default",
+		"gem › minitest":        "5.20.0, 5.16.3/",
+		"perl › Moose":          "2.2206/",
+		"composer › laravel/installer": "v5.8.0/",
+		"R › dplyr":             "1.1.4/",
+		"julia v1.10 › Plots":   "added/",
+		"luarocks › lpeg":       "1.1.0-1/",
+	} {
+		it := find(s, key)
+		if it == nil || it.Value+"/"+it.Tag != want {
+			t.Errorf("%s = %+v, want %s", key, it, want)
+		}
+	}
+	if find(s, "julia v1.10 › Plots\" = \"1") != nil || len(s.Items) != 10 {
+		t.Errorf("compat section leaked or extra items: %+v", s.Items)
+	}
+}
+
+func TestToolchains(t *testing.T) {
+	e := sandbox(t)
+	stub(t, e, "pyenv", `printf '3.11.9\n3.12.4\n'`)
+	stub(t, e, "rustup", `case "$1" in
+toolchain) printf 'stable-aarch64-apple-darwin (default)\nnightly-aarch64-apple-darwin\n';;
+component) printf 'clippy-aarch64-apple-darwin\n';;
+esac`)
+	stub(t, e, "asdf", `printf 'nodejs\n  20.11.0\n *22.1.0\nruby\n  No versions installed\n'`)
+	writeFile(t, e.HomePath(".nvm", "versions", "node", "v20.11.0", "bin", "node"), "", 0o755)
+	writeFile(t, filepath.Join(e.Root, "Library", "Java", "JavaVirtualMachines", "temurin-21.jdk", "x"), "", 0o644)
+	writeFile(t, e.HomePath(".sdkman", "candidates", "java", "21.0.2-tem", "x"), "", 0o644)
+	if err := os.Symlink("21.0.2-tem", e.HomePath(".sdkman", "candidates", "java", "current")); err != nil {
+		t.Fatal(err)
+	}
+	s := section(t, e, "toolchains")
+	for key, want := range map[string]string{
+		"pyenv › 3.12.4":                        "installed",
+		"rustup › stable-aarch64-apple-darwin":  "default",
+		"rustup › nightly-aarch64-apple-darwin": "installed",
+		"rustup component › clippy-aarch64-apple-darwin": "installed",
+		"asdf › nodejs 22.1.0":                  "installed",
+		"nvm › v20.11.0":                        "installed",
+		"jdk › temurin-21.jdk":                  "installed",
+		"sdkman java › 21.0.2-tem":              "installed",
+	} {
+		if it := find(s, key); it == nil || it.Value != want {
+			t.Errorf("%s = %+v, want %s", key, it, want)
+		}
+	}
+	for _, it := range s.Items {
+		if strings.Contains(it.Key, "No versions") || strings.Contains(it.Key, "current") {
+			t.Errorf("unexpected %q", it.Key)
+		}
+	}
+}

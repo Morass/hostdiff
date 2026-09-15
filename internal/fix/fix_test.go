@@ -101,3 +101,47 @@ func TestQuote(t *testing.T) {
 		t.Fatalf("quote round trip: %q %v", out, err)
 	}
 }
+
+func TestLibraryAndToolchainCommands(t *testing.T) {
+	r := result(
+		diff.Section{Kind: "libraries", Title: "Language libraries", Comparable: true, OnlyA: []snapshot.Item{
+			{Key: "python3.12 › requests", Value: "2.32", Tag: "user"},
+			{Key: "python3.12 › numpy", Value: "2.0", Tag: "system"},
+			{Key: "gem › rake", Value: "13"},
+			{Key: "gem › json", Value: "2.7", Tag: "default"},
+			{Key: "perl › Moose::Util", Value: "2"},
+			{Key: "R › data.table", Value: "1.15"},
+			{Key: "julia v1.10 › Plots", Value: "added"},
+			{Key: "R › x'); system('id", Value: "1"},
+		}},
+		diff.Section{Kind: "toolchains", Title: "Toolchains", Comparable: true, OnlyA: []snapshot.Item{
+			{Key: "pyenv › 3.12.4", Value: "installed"},
+			{Key: "rustup › nightly-aarch64-apple-darwin", Value: "installed"},
+			{Key: "asdf › nodejs 22.1.0", Value: "installed"},
+			{Key: "mise › go 1.23", Value: "active"},
+			{Key: "pyenv › 3.12; rm -rf ~", Value: "installed"},
+		}},
+	)
+	got := Script(r)
+	for _, want := range []string{
+		"python3.12 -m pip install --user 'requests'",
+		"# python3.12: numpy is installed system-wide there",
+		"gem install 'rake'",
+		"cpanm 'Moose::Util'",
+		`Rscript -e "install.packages('data.table')"`,
+		`julia -e 'using Pkg; Pkg.add("Plots")'`,
+		"pyenv install '3.12.4'",
+		"rustup toolchain install 'nightly-aarch64-apple-darwin'",
+		"asdf install 'nodejs' '22.1.0'",
+		"mise install 'go@1.23'",
+		"# skipped libraries R › x'); system('id: unusual characters",
+		"# skipped toolchains pyenv › 3.12; rm -rf ~: unusual characters",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "gem install 'json'") {
+		t.Error("default gem installed explicitly")
+	}
+}
