@@ -1,6 +1,7 @@
 package fix
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -179,7 +180,7 @@ func TestInstallerRunsEveryStep(t *testing.T) {
 	if err == nil {
 		t.Errorf("failed steps must fail the installer:\n%s", out)
 	}
-	for _, want := range []string{"==> hdtest-fail", "hdtest-missing-tool is not installed on this machine", "1 of 3 done, 2 failed", "Failed:"} {
+	for _, want := range []string{"==> [1/3] hdtest-fail", "✗ failed (exit 3)", "==> [2/3] hdtest-missing-tool x", "✗ hdtest-missing-tool is not installed on this machine", "==> [3/3] hdtest-ok", "✓ done", "1 of 3 done, 2 failed", "Failed:"} {
 		if !strings.Contains(string(out), want) {
 			t.Errorf("missing %q in:\n%s", want, out)
 		}
@@ -282,5 +283,30 @@ func TestCloneOrder(t *testing.T) {
 	want := []string{"brew install wget", "npm install -g x@2.0.0", "brew uninstall jq", "brew untap owner/tools"}
 	if strings.Join(got, " | ") != strings.Join(want, " | ") {
 		t.Fatalf("clone:\n got %q\nwant %q", got, want)
+	}
+}
+
+// The script contains, for every step, the exact command line a person
+// confirmed, and nothing that runs besides those lines.
+func TestInstallerRunsTheShownCommands(t *testing.T) {
+	acts := []Action{
+		{Kind: "brew", Key: "formula › jq", Verb: Remove, Argv: []string{"brew", "uninstall", "jq"}},
+		{Kind: "defaults", Key: "screenshots › location", Verb: Set, Argv: []string{"defaults", "write", "com.apple.screencapture", "location", "-string", "~/Pictures/Shot's"}},
+	}
+	script := Installer("desk", acts, true)
+	for i, a := range acts {
+		line := fmt.Sprintf("step %d/2 %s %s", i+1, Quote(a.Command()), a.Command())
+		if !strings.Contains(script, "\n"+line+"\n") {
+			t.Errorf("missing step line %q in:\n%s", line, script)
+		}
+	}
+	commands := 0
+	for _, l := range strings.Split(script, "\n") {
+		if strings.HasPrefix(l, "step ") {
+			commands++
+		}
+	}
+	if commands != 2 {
+		t.Errorf("%d step lines, want 2", commands)
 	}
 }

@@ -96,6 +96,7 @@ type view struct {
 	menuCur   int
 
 	confirm   *choice
+	confirmed []string // the confirmation text, while the full script is shown
 	typed     string
 	detail    []string
 	detailFor string
@@ -497,43 +498,72 @@ func verbTitle(verb string) string {
 
 func (v *view) openConfirm(c choice) {
 	l := v.labels()
-	where := v.b.Side(c.side).Where
-	lines := []string{fmt.Sprintf("On %s (%s):", l[c.side], where), ""}
-	groups := map[string][]fix.Action{}
-	for _, a := range c.acts {
-		groups[a.Verb] = append(groups[a.Verb], a)
+	side := v.b.Side(c.side)
+	on := l[c.side]
+	if side.Remote {
+		on += " (" + side.Where + ")"
+	} else {
+		on += " (this machine)"
 	}
-	for _, verb := range []string{fix.Install, fix.Update, fix.Set, fix.Remove, fix.Reset} {
-		if len(groups[verb]) == 0 {
-			continue
+	lines := []string{
+		fmt.Sprintf("hostdiff will run these %d commands on %s, in this order, exactly as written:", len(c.acts), on),
+		"",
+	}
+	removals := 0
+	prev := ""
+	for i, a := range c.acts {
+		if a.Verb != prev {
+			lines = append(lines, verbTitle(a.Verb))
+			prev = a.Verb
 		}
-		lines = append(lines, fmt.Sprintf("%s (%d):", verbTitle(verb), len(groups[verb])))
-		for _, a := range groups[verb] {
-			lines = append(lines, "  "+a.Command())
+		lines = append(lines, fmt.Sprintf("  %3d  %s", i+1, a.Command()))
+		if a.Verb == fix.Remove {
+			removals++
 		}
-		lines = append(lines, "")
+	}
+	lines = append(lines, "")
+	if removals > 0 {
+		lines = append(lines, fmt.Sprintf("Remove: this deletes %d items from %s.", removals, l[c.side]), "")
 	}
 	if len(c.notes) > 0 {
-		lines = append(lines, fmt.Sprintf("# Not included (%d):", len(c.notes)))
+		lines = append(lines, fmt.Sprintf("# Not included, no command (%d):", len(c.notes)))
 		for _, n := range c.notes {
 			lines = append(lines, "#   "+n.Key+": "+n.Note)
 		}
 		lines = append(lines, "")
 	}
-	lines = append(lines,
-		"# The commands run one by one in this terminal; you can answer password prompts.",
-		"# A failed step does not stop the rest; Ctrl-C stops after the current step.",
-		"# Afterwards the affected groups are scanned again.")
-	if len(groups[fix.Remove]) > 0 {
-		lines = append(lines, fmt.Sprintf("# This removes %d items from %s.", len(groups[fix.Remove]), l[c.side]))
+	how := "# How: the commands go into a temporary script (only readable by you), run with /bin/sh in this terminal, then deleted."
+	if side.Remote {
+		how = fmt.Sprintf("# How: the commands go into a temporary script, copied to %s over ssh, run there with /bin/sh in this terminal (ssh -t), then deleted.", l[c.side])
 	}
-	v.confirm, v.typed = &c, ""
+	lines = append(lines,
+		how,
+		"# Before each command the script prints it with its number; you can answer password prompts.",
+		"# A failed command does not stop the rest; Ctrl-C stops after the current one. Nothing else is run.",
+		"# Afterwards the affected groups are scanned again (read only). Tab shows the full script.")
+	v.confirm, v.typed, v.confirmed = &c, "", nil
 	v.detail, v.detailTop = lines, 0
 	v.detailFor = "Confirm: y runs these commands, esc cancels"
 	if v.needTyped() {
 		v.detailFor = "Confirm: type yes and press enter to run, esc cancels"
 	}
 	v.menu = nil
+}
+
+// toggleScript switches the confirmation between the command list and the
+// full script that will run.
+func (v *view) toggleScript() {
+	if v.confirm == nil {
+		return
+	}
+	if v.confirmed != nil {
+		v.detail, v.confirmed, v.detailTop = v.confirmed, nil, 0
+		return
+	}
+	v.confirmed = v.detail
+	script := fix.Installer(v.labels()[v.confirm.side], v.confirm.acts, true)
+	v.detail = append([]string{"# The full script, exactly as it will run. Tab goes back to the list.", ""}, strings.Split(strings.TrimRight(script, "\n"), "\n")...)
+	v.detailTop = 0
 }
 
 // needTyped reports whether the open confirmation wants "yes" typed out: a
@@ -577,7 +607,7 @@ func (v *view) snapOf(res *diff.Result, side int) *snapshot.Snapshot {
 // run starts the confirmed commands.
 func (v *view) run() tea.Cmd {
 	c := *v.confirm
-	v.confirm, v.detail, v.typed = nil, nil, ""
+	v.confirm, v.detail, v.typed, v.confirmed = nil, nil, "", nil
 	j := job{choice: c, before: map[string]string{}, had: map[string]bool{}}
 	snap := v.snapOf(v.res, c.side)
 	for _, a := range c.acts {
@@ -717,6 +747,10 @@ func (v *view) key(k string, msg tea.KeyMsg) (tea.Cmd, nav) {
 	}
 	if v.detail != nil {
 		h := v.bodyHeight()
+		if v.confirm != nil && msg.Type == tea.KeyTab {
+			v.toggleScript()
+			return nil, navNone
+		}
 		if v.needTyped() {
 			switch msg.Type {
 			case tea.KeyEnter:
@@ -725,7 +759,7 @@ func (v *view) key(k string, msg tea.KeyMsg) (tea.Cmd, nav) {
 				}
 				v.typed = ""
 			case tea.KeyEsc:
-				v.confirm, v.detail, v.typed = nil, nil, ""
+				v.confirm, v.detail, v.typed, v.confirmed = nil, nil, "", nil
 			case tea.KeyBackspace:
 				if r := []rune(v.typed); len(r) > 0 {
 					v.typed = string(r[:len(r)-1])
@@ -746,7 +780,7 @@ func (v *view) key(k string, msg tea.KeyMsg) (tea.Cmd, nav) {
 				return v.run(), navNone
 			}
 		case "q", "esc", "enter", "left", "h", "n":
-			v.detail, v.confirm = nil, nil
+			v.detail, v.confirm, v.confirmed = nil, nil, nil
 		case "down", "j":
 			v.detailTop++
 		case "up", "k":
@@ -961,8 +995,10 @@ func (v *view) render() string {
 				l = styleB.Render(l)
 			case strings.HasPrefix(l, "@@"), strings.HasPrefix(l, "#"):
 				l = styleDim.Render(l)
-			case strings.HasPrefix(l, "Remove ("):
+			case strings.HasPrefix(l, "Remove"):
 				l = styleBad.Render(l)
+			case v.confirm != nil && v.confirmed == nil && (l == "Install" || l == "Update" || l == "Set" || l == "Reset"):
+				l = styleBold.Render(l)
 			}
 			b.WriteString(truncate(l, w) + "\n")
 		}
@@ -972,9 +1008,9 @@ func (v *view) render() string {
 		footer := fmt.Sprintf("line %d/%d · ↑↓ scroll · esc back", min(v.detailTop+1, len(v.detail)), len(v.detail))
 		switch {
 		case v.needTyped():
-			footer = "type yes and press enter to run: " + v.typed + "▏ · esc cancels"
+			footer = "type yes and press enter to run: " + v.typed + "▏ · tab full script · esc cancels"
 		case v.confirm != nil:
-			footer = "y run · esc cancel · ↑↓ scroll"
+			footer = "y run · tab full script · esc cancel · ↑↓ scroll"
 		}
 		b.WriteString(styleBold.Render(truncate(footer, w)))
 		return b.String()

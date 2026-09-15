@@ -735,30 +735,36 @@ func Installer(label string, actions []Action, wait bool) string {
 ok=0; fail=0; failed=""; stop=""
 trap 'stop=1' INT
 step() {
-	label=$1; shift
+	n=$1; label=$2; shift 2
 	[ -n "$stop" ] && return 0
-	printf '\n\033[1m==> %s\033[0m\n' "$label"
+	printf '\n\033[1m==> [%s] %s\033[0m\n' "$n" "$label"
 	if ! command -v "$1" >/dev/null 2>&1; then
-		printf '%s is not installed on this machine\n' "$1"
+		printf '\033[31m✗ %s is not installed on this machine\033[0m\n' "$1"
 		fail=$((fail+1)); failed="$failed
-  $label ($1 not installed)"
+  [$n] $label ($1 not installed)"
 		return 0
 	fi
 	if "$@"; then
-		ok=$((ok+1))
+		ok=$((ok+1)); printf '\033[32m✓ done\033[0m\n'
 	else
-		fail=$((fail+1)); failed="$failed
-  $label"
+		rc=$?; fail=$((fail+1)); printf '\033[31m✗ failed (exit %s)\033[0m\n' "$rc"
+		failed="$failed
+  [$n] $label"
 	fi
 }
 `)
-	n := 0
+	var steps []Action
 	for _, a := range actions {
-		if !a.Runnable() {
-			continue
+		if a.Runnable() {
+			steps = append(steps, a)
 		}
-		n++
-		fmt.Fprintf(&b, "step %s %s\n", Quote(comment(a.Command())), Action{Argv: a.Argv}.quotedAll())
+	}
+	n := len(steps)
+	// Each step runs exactly the command line the confirmation showed:
+	// after "step N LABEL" comes the same text, which Command quotes so the
+	// shell reads it as the argument list and nothing more.
+	for i, a := range steps {
+		fmt.Fprintf(&b, "step %d/%d %s %s\n", i+1, n, Quote(a.Command()), a.Command())
 	}
 	fmt.Fprintf(&b, "printf '\\n\\033[1mhostdiff: %%d of %d done, %%d failed\\033[0m' \"$ok\" \"$fail\"\n", n)
 	b.WriteString(`[ -n "$stop" ] && printf ' (stopped with Ctrl-C)'
@@ -770,14 +776,4 @@ printf '\n'
 	}
 	b.WriteString(`[ "$fail" -eq 0 ] && [ -z "$stop" ]` + "\n")
 	return b.String()
-}
-
-// quotedAll single-quotes every word, for a script that must not depend on
-// which characters a shell treats literally.
-func (a Action) quotedAll() string {
-	words := make([]string, len(a.Argv))
-	for i, w := range a.Argv {
-		words[i] = Quote(w)
-	}
-	return strings.Join(words, " ")
 }

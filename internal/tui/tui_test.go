@@ -62,7 +62,7 @@ func newFake() *fakeBackend {
 		f.scripts = append(f.scripts, script)
 		return exec.Command("true"), func() {}, nil
 	}
-	f.sides = [2]Side{{Where: "this machine", Prepare: prep}, {Where: "ssh desk", Prepare: prep}}
+	f.sides = [2]Side{{Where: "this machine", Prepare: prep}, {Where: "ssh desk", Remote: true, Prepare: prep}}
 	return f
 }
 
@@ -224,7 +224,11 @@ func TestRemoveOneItem(t *testing.T) {
 	press(a, "tab", "j", "enter")
 	must(t, a.View(), "formula › jq", "Install on desk", "Remove from laptop")
 	press(a, "j", "enter")
-	must(t, a.View(), "On laptop (this machine):", "Remove (1):", "brew uninstall jq", "y run")
+	must(t, a.View(), "hostdiff will run these 1 commands on laptop (this machine), in this order, exactly as written:", "Remove", "  1  brew uninstall jq", "deletes 1 items from laptop", "y run")
+	press(a, "tab")
+	must(t, a.View(), "The full script, exactly as it will run", "#!/bin/sh", "step 1/1 'brew uninstall jq' brew uninstall jq")
+	press(a, "tab")
+	must(t, a.View(), "  1  brew uninstall jq")
 	f.onCollect = func(side int, s *snapshot.Snapshot) {
 		if side == 0 {
 			items := s.Sections[0].Items[:0]
@@ -237,7 +241,7 @@ func TestRemoveOneItem(t *testing.T) {
 		}
 	}
 	run(t, a, press(a, "y"))
-	if !strings.Contains(f.scripts[0], "'brew' 'uninstall' 'jq'") || f.collected[len(f.collected)-1] != "0 [brew]" {
+	if !strings.Contains(f.scripts[0], "step 1/1 'brew uninstall jq' brew uninstall jq") || f.collected[len(f.collected)-1] != "0 [brew]" {
 		t.Errorf("script %q, collected %v", f.scripts, f.collected)
 	}
 	v := a.View()
@@ -258,7 +262,7 @@ func TestUpdateToOtherVersion(t *testing.T) {
 	press(a, "tab", "j", "j", "j", "enter")
 	must(t, a.View(), "Update on laptop to desk's version", "Update on desk to laptop's version", "Remove from laptop", "Remove from desk")
 	press(a, "enter")
-	must(t, a.View(), "Update (1):", "brew upgrade node")
+	must(t, a.View(), "Update", "  1  brew upgrade node")
 }
 
 func TestCloneAsksToTypeYesWhenRemoving(t *testing.T) {
@@ -267,7 +271,7 @@ func TestCloneAsksToTypeYesWhenRemoving(t *testing.T) {
 	press(a, "C")
 	must(t, a.View(), "Make laptop like desk: 1 install, 1 update, 2 remove", "Make desk like laptop")
 	press(a, "enter")
-	must(t, a.View(), "type yes", "brew install wget", "brew upgrade node", "brew uninstall jq", "brew uninstall --cask rectangle", "This removes 2 items from laptop")
+	must(t, a.View(), "type yes", "4 commands on laptop", "1  brew install wget", "2  brew upgrade node", "brew uninstall jq", "brew uninstall --cask rectangle", "deletes 2 items from laptop")
 	if cmd := press(a, "y", "enter"); cmd != nil || a.view.confirm == nil {
 		t.Fatal("clone ran without yes typed out")
 	}
@@ -277,7 +281,7 @@ func TestCloneAsksToTypeYesWhenRemoving(t *testing.T) {
 		t.Fatalf("scripts: %v", f.scripts)
 	}
 	s := f.scripts[0]
-	if strings.Index(s, "'install' 'wget'") > strings.Index(s, "'uninstall'") {
+	if strings.Index(s, "brew install wget") > strings.Index(s, "brew uninstall") {
 		t.Errorf("removals must come after installs:\n%s", s)
 	}
 	must(t, a.View(), "laptop: ")
@@ -349,4 +353,10 @@ func TestKeyBurstAndTinyWindow(t *testing.T) {
 	_ = a.View()
 	press(a, "esc")
 	_ = a.View()
+}
+
+func TestRemoteConfirmationSaysHow(t *testing.T) {
+	a := started(t, newFake(), Start{B: "desk", Kinds: []string{"brew"}})
+	press(a, "tab", "enter", "enter")
+	must(t, a.View(), "on desk (ssh desk)", "copied to desk over ssh, run there with /bin/sh", "1  brew install --cask rectangle")
 }

@@ -426,7 +426,7 @@ func (t *target) installSide(tty bool) tui.Side {
 		return tui.Side{Where: "snapshot file", NoInstall: "it is a snapshot file, not a live machine"}
 	case t.machine != nil:
 		m := t.machine
-		return tui.Side{Where: "ssh " + m.SSH, Prepare: func(script string) (*exec.Cmd, func(), error) {
+		return tui.Side{Where: "ssh " + m.SSH, Remote: true, Prepare: func(script string) (*exec.Cmd, func(), error) {
 			cmd, err := remote.InstallCommand(m, script, tty)
 			return cmd, func() {}, err
 		}}
@@ -473,10 +473,11 @@ func installCLI(res *diff.Result, targets []*target, side int, yes bool, refresh
 		fmt.Fprintf(stdout, "Nothing hostdiff can install on %s from %s.\n", t.label, other.label)
 		return nil
 	}
-	fmt.Fprintf(stdout, "On %s (%s), to bring over what %s has:\n", t.label, how.Where, other.label)
-	for _, a := range acts {
-		fmt.Fprintln(stdout, "  "+a.Command())
+	fmt.Fprintf(stdout, "To bring over what %s has, hostdiff will run these %d commands on %s (%s), in this order, exactly as written:\n\n", other.label, len(acts), t.label, how.Where)
+	for i, a := range acts {
+		fmt.Fprintf(stdout, "  %3d  %s\n", i+1, a.Command())
 	}
+	fmt.Fprintln(stdout, "\nEach command is printed with its number before it runs; a failure does not stop the rest.")
 	if notes > 0 {
 		fmt.Fprintf(stdout, "(%d more differences have no install command; --script lists them)\n", notes)
 	}

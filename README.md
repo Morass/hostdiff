@@ -64,8 +64,9 @@ chooses the groups. Piped or with `--format text|markdown|json` it prints.
 **Acting on the results.** Select items with `space` (on the left: the whole
 group), then `enter` lists what hostdiff can do with them on either machine:
 install, update to the other machine's version, remove, or set and reset a
-setting. Every choice opens a confirmation with the exact commands; `y` runs
-them in your terminal, on this machine directly and on the other over ssh
+setting. Every choice opens a confirmation that lists the numbered command
+lines exactly as they will run, says how they reach the machine, and shows
+the whole script on `tab`; `y` runs them in your terminal, on this machine directly and on the other over ssh
 with a terminal, so `sudo` and installer prompts work. Steps run one by one,
 a failure does not stop the rest, Ctrl-C stops after the current step, and
 the affected groups are scanned again. `C` (clone) makes one machine like

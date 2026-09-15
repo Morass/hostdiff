@@ -47,6 +47,8 @@ type Group struct {
 // Side says whether and how commands can run on one machine.
 type Side struct {
 	Where string
+	// Remote is true when commands reach the machine over ssh.
+	Remote bool
 	// NoInstall says why nothing can change there (a snapshot file).
 	NoInstall string
 	// Prepare turns an installer script into the command that runs it on

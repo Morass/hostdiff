@@ -427,7 +427,7 @@ func TestInstallOnEitherSide(t *testing.T) {
 	}
 
 	there := w.run("diff", "laptop", "--install", "laptop", "--yes", "--only", "brew", "--no-color")
-	for _, want := range []string{"On laptop (ssh laptop)", "brew install node", "installed node", "1 of 1 done"} {
+	for _, want := range []string{"on laptop (ssh laptop), in this order, exactly as written", "brew install node", "installed node", "1 of 1 done"} {
 		if !strings.Contains(there.stdout+there.stderr, want) {
 			t.Errorf("remote install missing %q: %+v", want, there)
 		}
