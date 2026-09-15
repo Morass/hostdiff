@@ -10,7 +10,7 @@ shows only what differs.
 
 - **Compare** this machine with another one over your existing ssh setup, or two saved snapshots.
 - **Browse** the differences section by section, with a content diff for any changed file.
-- **Bring things over** with a generated install script you review before running.
+- **Install what is missing** on either machine: mark items in the view, check the commands, and hostdiff runs them there (over ssh for the other machine) and collects again.
 
 It is a single Go binary for macOS and Linux. The other machine does not need
 hostdiff installed: when it is missing and the systems match, the binary is
@@ -58,6 +58,26 @@ differs on the right (◀ only on the first machine, ▶ only on the second,
 `a` also lists what is the same, `d` shows package dependencies, `s` shows
 the install script. Piped or with `--format text|markdown|json` it prints
 instead.
+
+**Installing from the view.** `○` marks items hostdiff knows how to install
+on the machine that lacks them. `space` marks one (`●`, in that machine's
+colour; on a changed setting it cycles through both machines), `space` on a
+section marks all of it, `x` clears the marks. `i` shows the exact commands
+per machine and `y` runs them in your terminal: on this machine directly, on
+the other one over ssh with a terminal, so `sudo` and installer prompts work.
+Steps run one by one, a failure does not stop the rest, Ctrl-C stops after
+the current step. The affected sections are then collected again and the
+view shows what now matches. The same without the view:
+`hostdiff diff laptop --install localhost` (add `--yes` to skip the question).
+
+What can be installed: Homebrew formulae (requested ones), casks and taps,
+App Store apps (`mas`), npm, pnpm, pipx, uv, cargo, gh and dotnet global
+tools, VS Code, Cursor and VSCodium extensions, pip `--user` packages per
+Python version, gems, CPAN modules, Composer, R, Julia, LuaRocks and Dart
+packages, pyenv, rbenv, rustup, asdf, mise and uv Python versions, and
+scalar macOS settings (`defaults write`). hostdiff never removes, upgrades
+or downgrades anything, and does not copy dotfiles (snapshots hold them
+with secrets redacted).
 
 ```text
 ◀ desk (desk, macOS/arm64, 2026-09-15 17:30)
@@ -171,6 +191,8 @@ hostdiff diff [A] B        compare two machines or snapshots (A defaults to this
   --details                show content diffs for changed files and plists
   --format FORMAT          text, markdown or json (default: interactive in a terminal)
   --script                 print a shell script, run on A, that brings over what B has
+  --install NAME           install on NAME (A or B) what the other side has, then collect again
+  --yes                    with --install: run without asking
   --save                   keep the collected snapshots for NAME@last
 
 hostdiff snap [NAME]       take a snapshot of this or another machine
@@ -190,7 +212,8 @@ it can guard scripts: `hostdiff diff golden.json --only brew --format text`.
 
 ## Safety and privacy
 
-hostdiff only reads. The generated script is printed, never run.
+hostdiff only reads, unless you install from the view or with `--install`.
+Then it runs exactly the commands it showed you, after you confirmed them.
 
 - **Secrets are removed where they are read.** Every value passes one
   redaction step on the machine being collected, before it is written to a

@@ -1,9 +1,12 @@
 // Package tui is the interactive view of a comparison: sections on the left,
-// what differs on the right, and the content diff of any item on Enter.
+// what differs on the right, the content diff of any item on Enter, and
+// installing marked items on either machine.
 package tui
 
 import (
 	"fmt"
+	"os/exec"
+	"sort"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -34,8 +37,59 @@ type row struct {
 	item   *snapshot.Item
 }
 
+// Side says whether and how hostdiff can install on one machine of the
+// comparison.
+type Side struct {
+	// Where describes how the machine is reached: "this machine", "ssh laptop".
+	Where string
+	// NoInstall says why nothing can be installed there (a snapshot file).
+	NoInstall string
+	// Prepare turns an installer script into the command that runs it on that
+	// machine in this terminal, and returns what to clean up afterwards.
+	Prepare func(script string) (*exec.Cmd, func(), error)
+}
+
+// Options connect the view to the machines. The zero value is read-only.
+type Options struct {
+	Sides [2]Side
+	// Refresh collects the given sections of one side (0 is A) again and
+	// returns the new comparison.
+	Refresh func(side int, kinds []string) (*diff.Result, error)
+}
+
+type markID struct {
+	side      int
+	kind, key string
+}
+
+type preparedMsg struct {
+	side    int
+	cmd     *exec.Cmd
+	cleanup func()
+	err     error
+	marked  []markID
+}
+
+type ranMsg struct {
+	preparedMsg
+	err error
+}
+
+type refreshedMsg struct {
+	side   int
+	res    *diff.Result
+	err    error
+	marked []markID
+}
+
 // Model is the bubbletea model.
 type Model struct {
+	opt        Options
+	marks      map[markID]bool
+	plan       bool
+	busy       bool
+	queue      []int
+	status     string
 	res        *diff.Result
 	secs       []int
 	sec, row   int
@@ -54,18 +108,9 @@ type Model struct {
 
 // New builds the model. Sections where nothing could be collected on either
 // side are left out.
-func New(res *diff.Result) Model {
-	m := Model{res: res, width: 100, height: 30}
-	for i := range res.Sections {
-		s := &res.Sections[i]
-		if !s.Comparable && s.StatusA == snapshot.Absent && s.StatusB == snapshot.Absent {
-			continue
-		}
-		if s.Comparable && len(s.OnlyA)+len(s.OnlyB)+len(s.Changed)+len(s.Same) == 0 {
-			continue
-		}
-		m.secs = append(m.secs, i)
-	}
+func New(res *diff.Result, opt Options) Model {
+	m := Model{opt: opt, marks: map[markID]bool{}, width: 100, height: 30}
+	m.setResult(res)
 	// Start on the first section with differences.
 	for i, si := range m.secs {
 		if res.Sections[si].Differences() > 0 {
@@ -76,10 +121,287 @@ func New(res *diff.Result) Model {
 	return m
 }
 
+// setResult shows a new comparison, staying on the same section.
+func (m *Model) setResult(res *diff.Result) {
+	kind := ""
+	if s := m.section(); s != nil {
+		kind = s.Kind
+	}
+	m.res, m.secs, m.sec = res, nil, 0
+	for i := range res.Sections {
+		s := &res.Sections[i]
+		if !s.Comparable && s.StatusA == snapshot.Absent && s.StatusB == snapshot.Absent {
+			continue
+		}
+		if s.Comparable && len(s.OnlyA)+len(s.OnlyB)+len(s.Changed)+len(s.Same) == 0 {
+			continue
+		}
+		if s.Kind == kind {
+			m.sec = len(m.secs)
+		}
+		m.secs = append(m.secs, i)
+	}
+}
+
 // Run shows the comparison until the user quits.
-func Run(res *diff.Result) error {
-	_, err := tea.NewProgram(New(res), tea.WithAltScreen()).Run()
+func Run(res *diff.Result, opt Options) error {
+	_, err := tea.NewProgram(New(res, opt), tea.WithAltScreen()).Run()
 	return err
+}
+
+func (m *Model) label(side int) string {
+	if side == 0 {
+		return m.res.A.Label
+	}
+	return m.res.B.Label
+}
+
+// actions returns what hostdiff could run for a row on each side (0 is A).
+func (m *Model) actions(kind string, r row) [2]*fix.Action {
+	var out [2]*fix.Action
+	set := func(side int, a fix.Action, ok bool) {
+		if ok {
+			out[side] = &a
+		}
+	}
+	switch {
+	case r.change != nil:
+		c := r.change
+		a, ok := fix.ForChange(kind, c.Key, c.B, c.TagB, c.A, c.TagA)
+		set(0, a, ok)
+		a, ok = fix.ForChange(kind, c.Key, c.A, c.TagA, c.B, c.TagB)
+		set(1, a, ok)
+	case r.mark == "▶":
+		a, ok := fix.ForMissing(kind, *r.item)
+		set(0, a, ok)
+	case r.mark == "◀":
+		a, ok := fix.ForMissing(kind, *r.item)
+		set(1, a, ok)
+	}
+	return out
+}
+
+// installable returns the sides a row can be installed on, and otherwise
+// the reason it cannot.
+func (m *Model) installable(kind string, r row) ([]int, string) {
+	var sides []int
+	why := "hostdiff has no install command for " + r.key
+	for side, a := range m.actions(kind, r) {
+		switch {
+		case a == nil:
+		case !a.Runnable():
+			why = r.key + ": " + a.Note
+		case m.opt.Sides[side].NoInstall != "":
+			why = "cannot install on " + m.label(side) + ": " + m.opt.Sides[side].NoInstall
+		case m.opt.Sides[side].Prepare == nil:
+			why = "installing is not available in this view"
+		default:
+			sides = append(sides, side)
+		}
+	}
+	return sides, why
+}
+
+// canInstall reports whether either side accepts installs.
+func (m *Model) canInstall() bool {
+	for _, s := range m.opt.Sides {
+		if s.Prepare != nil && s.NoInstall == "" {
+			return true
+		}
+	}
+	return false
+}
+
+// markedSide returns the side a row is marked for, or -1.
+func (m *Model) markedSide(kind, key string) int {
+	for side := 0; side < 2; side++ {
+		if m.marks[markID{side, kind, key}] {
+			return side
+		}
+	}
+	return -1
+}
+
+// toggle cycles a row through "not marked" and each side it can go to.
+func (m *Model) toggle(kind string, r row) {
+	sides, why := m.installable(kind, r)
+	if len(sides) == 0 {
+		m.status = why
+		return
+	}
+	cur := m.markedSide(kind, r.key)
+	for side := 0; side < 2; side++ {
+		delete(m.marks, markID{side, kind, r.key})
+	}
+	for i, side := range sides {
+		if cur == -1 || (side == cur && i+1 < len(sides)) {
+			next := sides[0]
+			if cur != -1 {
+				next = sides[i+1]
+			}
+			m.marks[markID{next, kind, r.key}] = true
+			m.status = "marked " + r.key + " to install on " + m.label(next)
+			return
+		}
+	}
+	m.status = "unmarked " + r.key
+}
+
+// toggleSection marks every installable row shown in the section, or clears
+// them when all are marked already.
+func (m *Model) toggleSection() {
+	s := m.section()
+	if s == nil {
+		return
+	}
+	type pick struct {
+		key  string
+		side int
+	}
+	var picks []pick
+	allMarked := true
+	for _, r := range m.rows() {
+		if sides, _ := m.installable(s.Kind, r); len(sides) > 0 {
+			picks = append(picks, pick{r.key, sides[0]})
+			allMarked = allMarked && m.markedSide(s.Kind, r.key) != -1
+		}
+	}
+	if len(picks) == 0 {
+		m.status = "nothing in " + s.Title + " that hostdiff can install"
+		return
+	}
+	for _, p := range picks {
+		for side := 0; side < 2; side++ {
+			delete(m.marks, markID{side, s.Kind, p.key})
+		}
+		if !allMarked {
+			m.marks[markID{p.side, s.Kind, p.key}] = true
+		}
+	}
+	if allMarked {
+		m.status = fmt.Sprintf("unmarked %d items in %s", len(picks), s.Title)
+	} else {
+		m.status = fmt.Sprintf("marked %d items in %s", len(picks), s.Title)
+	}
+}
+
+// markedPlan returns the marked actions for one side, in install order.
+func (m *Model) markedPlan(side int) []fix.Action {
+	var out []fix.Action
+	for _, a := range fix.Plan(m.res, side == 0) {
+		if a.Runnable() && m.marks[markID{side, a.Kind, a.Key}] {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
+func (m *Model) markSummary() string {
+	var parts []string
+	for side := 0; side < 2; side++ {
+		n := 0
+		for id := range m.marks {
+			if id.side == side {
+				n++
+			}
+		}
+		if n > 0 {
+			parts = append(parts, fmt.Sprintf("%d → %s", n, m.label(side)))
+		}
+	}
+	return strings.Join(parts, ", ")
+}
+
+func (m *Model) openPlan() {
+	var lines []string
+	for side := 0; side < 2; side++ {
+		acts := m.markedPlan(side)
+		if len(acts) == 0 {
+			continue
+		}
+		lines = append(lines, fmt.Sprintf("On %s (%s), %d commands:", m.label(side), m.opt.Sides[side].Where, len(acts)))
+		for _, a := range acts {
+			lines = append(lines, "  "+a.Command())
+		}
+		lines = append(lines, "")
+	}
+	if len(lines) == 0 {
+		m.status = "mark items with space first (○ marks what hostdiff can install)"
+		return
+	}
+	lines = append(lines,
+		"# The commands run one by one in this terminal; you can answer password prompts.",
+		"# A failed step does not stop the rest, Ctrl-C stops after the current step.",
+		"# Afterwards those sections are collected again to show what now matches.")
+	m.detail, m.detailName, m.detailTop, m.plan = lines, "Install marked items: y runs them, esc goes back", 0, true
+}
+
+// next starts the install on the next queued side.
+func (m Model) next() (tea.Model, tea.Cmd) {
+	for len(m.queue) > 0 {
+		side := m.queue[0]
+		m.queue = m.queue[1:]
+		acts := m.markedPlan(side)
+		if len(acts) == 0 {
+			continue
+		}
+		var marked []markID
+		for _, a := range acts {
+			marked = append(marked, markID{side, a.Kind, a.Key})
+		}
+		m.busy = true
+		m.status = "starting the install on " + m.label(side) + "…"
+		script := fix.Installer(m.label(side), acts, true)
+		prepare := m.opt.Sides[side].Prepare
+		return m, func() tea.Msg {
+			cmd, cleanup, err := prepare(script)
+			return preparedMsg{side: side, cmd: cmd, cleanup: cleanup, err: err, marked: marked}
+		}
+	}
+	m.busy = false
+	return m, nil
+}
+
+func kindsOf(ids []markID) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, id := range ids {
+		if !seen[id.kind] {
+			seen[id.kind] = true
+			out = append(out, id.kind)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// stillDifferent counts marked items that the new comparison still lists as
+// missing on their side. An installed package at another version than the
+// other machine's counts as installed; a setting must match.
+func stillDifferent(res *diff.Result, ids []markID) int {
+	n := 0
+	for _, id := range ids {
+		for _, s := range res.Sections {
+			if s.Kind != id.kind {
+				continue
+			}
+			missing := s.OnlyA
+			if id.side == 0 {
+				missing = s.OnlyB
+			}
+			for _, it := range missing {
+				if it.Key == id.key {
+					n++
+				}
+			}
+			for _, c := range s.Changed {
+				if c.Key == id.key && id.kind == "defaults" {
+					n++
+				}
+			}
+		}
+	}
+	return n
 }
 
 func (m Model) Init() tea.Cmd { return nil }
@@ -166,6 +488,47 @@ func (m *Model) clamp() {
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case preparedMsg:
+		if msg.err != nil {
+			m.status = fmt.Sprintf("could not start the install on %s: %v", m.label(msg.side), msg.err)
+			return m.next()
+		}
+		m.status = "installing on " + m.label(msg.side) + "…"
+		return m, tea.ExecProcess(msg.cmd, func(err error) tea.Msg { return ranMsg{preparedMsg: msg, err: err} })
+	case ranMsg:
+		if msg.cleanup != nil {
+			msg.cleanup()
+		}
+		if m.opt.Refresh == nil {
+			for _, id := range msg.marked {
+				delete(m.marks, id)
+			}
+			m.status = "install on " + m.label(msg.side) + " finished"
+			return m.next()
+		}
+		kinds := kindsOf(msg.marked)
+		m.status = "collecting " + strings.Join(kinds, ", ") + " on " + m.label(msg.side) + " again…"
+		refresh, side, marked := m.opt.Refresh, msg.side, msg.marked
+		return m, func() tea.Msg {
+			res, err := refresh(side, kinds)
+			return refreshedMsg{side: side, res: res, err: err, marked: marked}
+		}
+	case refreshedMsg:
+		for _, id := range msg.marked {
+			delete(m.marks, id)
+		}
+		if msg.err != nil {
+			m.status = "collecting again failed: " + msg.err.Error()
+			return m.next()
+		}
+		left := stillDifferent(msg.res, msg.marked)
+		m.setResult(msg.res)
+		m.clamp()
+		m.status = fmt.Sprintf("%s: %d of %d installed items now match", m.label(msg.side), len(msg.marked)-left, len(msg.marked))
+		if left > 0 {
+			m.status += fmt.Sprintf("; %d still differ (see the install output, or mark them again)", left)
+		}
+		return m.next()
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		m.clamp()
@@ -191,6 +554,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) key(k string, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.busy {
+		if k == "ctrl+c" {
+			return m, tea.Quit
+		}
+		return m, nil
+	}
 	if m.filtering {
 		switch msg.Type {
 		case tea.KeyEnter:
@@ -212,8 +581,14 @@ func (m Model) key(k string, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.detail != nil {
 		h := m.bodyHeight()
 		switch k {
+		case "y":
+			if m.plan {
+				m.detail, m.plan = nil, false
+				m.queue = []int{0, 1}
+				return m.next()
+			}
 		case "q", "esc", "enter", "left", "h":
-			m.detail = nil
+			m.detail, m.plan = nil, false
 		case "ctrl+c":
 			return m, tea.Quit
 		case "down", "j":
@@ -232,9 +607,23 @@ func (m Model) key(k string, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.detailTop = max(0, min(m.detailTop, len(m.detail)-h))
 		return m, nil
 	}
+	m.status = ""
 	switch k {
 	case "q", "ctrl+c":
 		return m, tea.Quit
+	case " ":
+		if s := m.section(); s != nil && s.Comparable {
+			if !m.right {
+				m.toggleSection()
+			} else if rows := m.rows(); m.row >= 0 && m.row < len(rows) {
+				m.toggle(s.Kind, rows[m.row])
+			}
+		}
+	case "x":
+		m.marks = map[markID]bool{}
+		m.status = "all marks cleared"
+	case "i":
+		m.openPlan()
 	case "tab", "right", "l":
 		if !m.right {
 			m.right = true
@@ -376,7 +765,15 @@ func (m Model) View() string {
 
 	lw := min(30, max(18, w/3))
 	rw := max(10, w-lw-3)
-	b.WriteString(styleDim.Render(truncate(fmt.Sprintf("%d differences", m.res.Differences()), w)) + "\n")
+	info := fmt.Sprintf("%d differences", m.res.Differences())
+	if sum := m.markSummary(); sum != "" {
+		info += " · marked " + sum + " · i to install"
+	}
+	if m.status != "" {
+		b.WriteString(styleBold.Render(truncate(m.status, w)) + "\n")
+	} else {
+		b.WriteString(styleDim.Render(truncate(info, w)) + "\n")
+	}
 
 	left := make([]string, 0, h)
 	for i, si := range m.secs {
@@ -439,12 +836,27 @@ func (m Model) View() string {
 			default:
 				mark = styleDim.Render(mark)
 			}
-			line := padTo(truncate(r.key, kw), kw) + "  " + r.value
-			line = truncate(line, rw-2)
-			if i == m.row && m.right {
-				line = styleSel.Render(padTo(line, rw-2))
+			// The mark column only appears when a side can be installed on.
+			pick, pw := "", 2
+			if m.canInstall() {
+				pick, pw = "  ", 4
+				switch side := m.markedSide(s.Kind, r.key); {
+				case side == 0:
+					pick = styleA.Render("●") + " "
+				case side == 1:
+					pick = styleB.Render("●") + " "
+				default:
+					if sides, _ := m.installable(s.Kind, r); len(sides) > 0 {
+						pick = styleDim.Render("○") + " "
+					}
+				}
 			}
-			right = append(right, mark+" "+line)
+			line := padTo(truncate(r.key, kw), kw) + "  " + r.value
+			line = truncate(line, rw-pw)
+			if i == m.row && m.right {
+				line = styleSel.Render(padTo(line, rw-pw))
+			}
+			right = append(right, mark+" "+pick+line)
 		}
 	}
 
@@ -459,6 +871,12 @@ func (m Model) View() string {
 		b.WriteString(padTo(l, lw) + " │ " + r + "\n")
 	}
 	footer := "↑↓ move · tab/enter open · / filter · a same · d dependencies · s script · q quit"
+	if m.canInstall() {
+		footer = "↑↓ move · enter open · space mark · i install · / filter · a same · d deps · s script · q quit"
+	}
+	if m.busy {
+		footer = "installing… (ctrl+c quits hostdiff)"
+	}
 	if m.filtering || m.filter != "" {
 		footer = "filter: " + m.filter
 		if m.filtering {

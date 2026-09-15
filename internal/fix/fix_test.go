@@ -36,18 +36,21 @@ func TestInstallCommands(t *testing.T) {
 	)
 	got := Script(r)
 	for _, want := range []string{
-		"brew install 'jq'",
-		"brew install --cask 'alt-tab'",
-		"brew tap 'owner/tools'",
-		"mas install 409183694  # Keynote",
-		"defaults write 'com.apple.dock' 'autohide' -bool true",
-		"defaults write 'com.apple.screencapture' 'location' -string '~/Pictures/Shots'",
-		"# only on desk: brew uninstall 'wget'",
+		"brew install jq",
+		"brew install --cask alt-tab",
+		"brew tap owner/tools",
+		"mas install 409183694",
+		"defaults write com.apple.dock autohide -bool true",
+		"defaults write com.apple.screencapture location -string '~/Pictures/Shots'",
+		"# only on desk: brew uninstall wget",
 		"# skipped defaults dock › persistent-apps: not a simple value",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("missing %q in:\n%s", want, got)
 		}
+	}
+	if strings.Index(got, "brew tap") > strings.Index(got, "brew install jq") {
+		t.Errorf("tap must come before the formulae:\n%s", got)
 	}
 	if strings.Contains(got, "oniguruma") {
 		t.Errorf("dependency installed explicitly:\n%s", got)
@@ -127,16 +130,16 @@ func TestLibraryAndToolchainCommands(t *testing.T) {
 	)
 	got := Script(r)
 	for _, want := range []string{
-		"python3.12 -m pip install --user 'requests'",
-		"# python3.12: numpy is installed system-wide there",
-		"gem install 'rake'",
-		"cpanm 'Moose::Util'",
-		`Rscript -e "install.packages('data.table')"`,
+		"python3.12 -m pip install --user requests",
+		"# python3.12 › numpy: installed system-wide there",
+		"gem install rake",
+		"cpanm Moose::Util",
+		`Rscript -e 'install.packages('\''data.table'\''`,
 		`julia -e 'using Pkg; Pkg.add("Plots")'`,
-		"pyenv install '3.12.4'",
-		"rustup toolchain install 'nightly-aarch64-apple-darwin'",
-		"asdf install 'nodejs' '22.1.0'",
-		"mise install 'go@1.23'",
+		"pyenv install --skip-existing 3.12.4",
+		"rustup toolchain install nightly-aarch64-apple-darwin",
+		"asdf install nodejs 22.1.0",
+		"mise install go@1.23",
 		"# skipped libraries R › x'); system('id: unusual characters",
 		"# skipped toolchains pyenv › 3.12; rm -rf ~: unusual characters",
 	} {
@@ -144,7 +147,63 @@ func TestLibraryAndToolchainCommands(t *testing.T) {
 			t.Errorf("missing %q in:\n%s", want, got)
 		}
 	}
-	if strings.Contains(got, "gem install 'json'") {
+	if strings.Contains(got, "gem install json") {
 		t.Error("default gem installed explicitly")
+	}
+}
+
+// The installer runs every step, keeps going after a failure or a missing
+// tool, passes hostile names as plain arguments, and reports.
+func TestInstallerRunsEveryStep(t *testing.T) {
+	bin := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "pwned")
+	record := filepath.Join(t.TempDir(), "args")
+	for name, body := range map[string]string{
+		"hdtest-ok":   "printf '%s\\n' \"$@\" >> " + Quote(record),
+		"hdtest-fail": "exit 3",
+	} {
+		if err := os.WriteFile(filepath.Join(bin, name), []byte("#!/bin/sh\n"+body+"\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	evil := "$(touch " + marker + ")"
+	acts := []Action{
+		{Kind: "k", Key: "one", Argv: []string{"hdtest-fail"}},
+		{Kind: "k", Key: "two", Argv: []string{"hdtest-missing-tool", "x"}},
+		{Kind: "k", Key: "three", Argv: []string{"hdtest-ok", evil}},
+		{Kind: "k", Key: "note only", Note: "nothing to run"},
+	}
+	cmd := exec.Command("/bin/sh", "-c", Installer("box\ntouch "+marker, acts, false))
+	cmd.Env = []string{"PATH=" + bin + ":/usr/bin:/bin", "HOME=" + t.TempDir(), "HOSTDIFF_SYSROOT=/nonexistent"}
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Errorf("failed steps must fail the installer:\n%s", out)
+	}
+	for _, want := range []string{"==> hdtest-fail", "hdtest-missing-tool is not installed on this machine", "1 of 3 done, 2 failed", "Failed:"} {
+		if !strings.Contains(string(out), want) {
+			t.Errorf("missing %q in:\n%s", want, out)
+		}
+	}
+	if got, _ := os.ReadFile(record); string(got) != evil+"\n" {
+		t.Errorf("argument not passed literally: %q", got)
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatalf("injected command ran:\n%s", out)
+	}
+}
+
+// Every runnable action of a hostile snapshot renders to a command the shell
+// reads as exactly its argument list.
+func TestCommandRoundTrip(t *testing.T) {
+	for _, argv := range [][]string{
+		{"brew", "install", "jq"},
+		{"defaults", "write", "com.apple.x", "a key", "-string", "it's $(x) `y` ~ *"},
+		{"Rscript", "-e", "install.packages('a.b', repos = 'https://cloud.r-project.org')"},
+	} {
+		line := Action{Argv: append([]string{"printf", "%s\\n"}, argv...)}.Command()
+		out, err := exec.Command("/bin/sh", "-c", line).Output()
+		if err != nil || string(out) != strings.Join(argv, "\n")+"\n" {
+			t.Errorf("%q -> %q (%v)", line, out, err)
+		}
 	}
 }

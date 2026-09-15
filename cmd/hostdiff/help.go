@@ -28,7 +28,11 @@ A is this machine. A and B can be:
 
 In a terminal, diff opens an interactive view: sections on the left, what
 differs on the right, Enter for the content diff of an item, s for the
-install script. Piped, or with --format, --all or --details, it prints text.
+install script. Space marks an item to install on the machine that lacks it
+(○ shows what hostdiff can install; on a section it marks the whole
+section), i lists the commands and y runs them, on this machine or over
+ssh, in the terminal so password prompts work. The sections are then
+collected again. Nothing is ever removed or downgraded. Piped, or with --format, --all or --details, it prints text.
 
 Comparing a machine with itself is refused before anything is collected:
 this machine twice, or an ssh destination that ssh -G resolves back here
@@ -40,6 +44,8 @@ something does, 2 on error.`,
 hostdiff diff laptop desk --only brew,apps
 hostdiff diff laptop --details        # include changed file contents
 hostdiff diff laptop --script > sync.sh   # commands to bring laptop's tools here
+hostdiff diff laptop --install localhost --only brew   # install laptop's formulae here
+hostdiff diff laptop --install laptop     # install this machine's extras on laptop
 hostdiff diff laptop@last laptop      # what changed on laptop since the last --save
 hostdiff diff old.json new.json --format markdown`,
 		flags: `--only LIST       compare only these sections (comma separated)
@@ -48,6 +54,9 @@ hostdiff diff old.json new.json --format markdown`,
 --details         show content diffs for changed files and plists
 --format FORMAT   text (default), markdown or json
 --script          print a shell script, run on A, that brings over what B has (never runs it)
+--install NAME    install on NAME (either side) what the other side has: prints the
+                  commands, asks, runs them in this terminal, then collects again
+--yes             with --install: do not ask
 --save            also save the collected snapshots (see NAME@last)
 --no-color        plain text output`,
 	},

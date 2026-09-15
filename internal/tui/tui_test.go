@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"fmt"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -47,6 +49,8 @@ func send(m tea.Model, keys ...string) tea.Model {
 			msg = tea.KeyMsg{Type: tea.KeyDown}
 		case "backspace":
 			msg = tea.KeyMsg{Type: tea.KeyBackspace}
+		case "space":
+			msg = tea.KeyMsg{Type: tea.KeySpace, Runes: []rune{' '}}
 		default:
 			msg = tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(k)}
 		}
@@ -56,7 +60,12 @@ func send(m tea.Model, keys ...string) tea.Model {
 }
 
 func start() tea.Model {
-	m, _ := New(sample()).Update(tea.WindowSizeMsg{Width: 120, Height: 24})
+	m, _ := New(sample(), Options{}).Update(tea.WindowSizeMsg{Width: 120, Height: 24})
+	return m
+}
+
+func startWith(opt Options) tea.Model {
+	m, _ := New(sample(), opt).Update(tea.WindowSizeMsg{Width: 120, Height: 24})
 	return m
 }
 
@@ -125,13 +134,105 @@ func TestUnavailableSectionExplains(t *testing.T) {
 
 func TestScriptView(t *testing.T) {
 	v := send(start(), "s").View()
-	if !strings.Contains(v, "brew install 'wget'") || !strings.Contains(v, "Script to make laptop more like desk") {
+	if !strings.Contains(v, "brew install wget") || !strings.Contains(v, "Script to make laptop more like desk") {
 		t.Fatalf("script view:\n%s", v)
 	}
 }
 
 func TestSmallWindowDoesNotPanic(t *testing.T) {
-	m, _ := New(sample()).Update(tea.WindowSizeMsg{Width: 20, Height: 5})
+	m, _ := New(sample(), Options{}).Update(tea.WindowSizeMsg{Width: 20, Height: 5})
 	m = send(m, "tab", "G", "enter", "j", "esc", "/", "x", "enter")
 	_ = m.View()
+}
+
+func installable() (Options, *[]string) {
+	var scripts []string
+	prep := func(script string) (*exec.Cmd, func(), error) {
+		scripts = append(scripts, script)
+		return exec.Command("true"), func() {}, nil
+	}
+	return Options{Sides: [2]Side{{Where: "this machine", Prepare: prep}, {Where: "ssh desk", Prepare: prep}}}, &scripts
+}
+
+// Rows in brew: ◀ jq (only laptop, goes to desk), ▶ wget (goes to laptop),
+// ≠ node (a version difference: nothing to install).
+func TestMarkAndPlanBothSides(t *testing.T) {
+	opt, _ := installable()
+	m := send(startWith(opt), "tab", "space", "j", "space")
+	v := m.View()
+	if !strings.Contains(v, "marked") || !strings.Contains(v, "●") {
+		t.Fatalf("marks not shown:\n%s", v)
+	}
+	m = send(m, "j", "space")
+	if !strings.Contains(m.View(), "version differs") {
+		t.Errorf("unmarkable row not explained:\n%s", m.View())
+	}
+	v = send(m, "i").View()
+	for _, want := range []string{"On laptop (this machine), 1 commands:", "brew install wget", "On desk (ssh desk), 1 commands:", "brew install jq", "y runs them"} {
+		if !strings.Contains(v, want) {
+			t.Errorf("plan missing %q:\n%s", want, v)
+		}
+	}
+	if v := send(m, "x", "i").View(); !strings.Contains(v, "mark items with space first") {
+		t.Errorf("x did not clear:\n%s", v)
+	}
+}
+
+func TestSectionMarkAndSnapshotSide(t *testing.T) {
+	opt, _ := installable()
+	opt.Sides[1] = Side{Where: "snapshot file", NoInstall: "it is a snapshot file"}
+	m := send(startWith(opt), "space")
+	if v := m.View(); !strings.Contains(v, "marked 1 items in Homebrew") {
+		t.Errorf("section mark (only wget can go to the live side):\n%s", v)
+	}
+	m = send(startWith(opt), "tab", "space")
+	if v := m.View(); !strings.Contains(v, "cannot install on desk: it is a snapshot file") {
+		t.Errorf("snapshot side not refused:\n%s", v)
+	}
+}
+
+// y prepares the installer, runs it, collects again and reports what now
+// matches; the marks go away.
+func TestInstallRunsAndRefreshes(t *testing.T) {
+	opt, scripts := installable()
+	var refreshed []string
+	opt.Refresh = func(side int, kinds []string) (*diff.Result, error) {
+		refreshed = append(refreshed, fmt.Sprint(side, kinds))
+		r := sample()
+		r.Sections[1].OnlyB = nil // wget is now on laptop too
+		return r, nil
+	}
+	m := send(startWith(opt), "tab", "j", "space", "i")
+	m, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+	if cmd == nil || !strings.Contains(m.View(), "installing") {
+		t.Fatalf("y did not start:\n%s", m.View())
+	}
+	prepared := cmd().(preparedMsg)
+	if len(*scripts) != 1 || !strings.Contains((*scripts)[0], "'brew' 'install' 'wget'") {
+		t.Fatalf("installer script: %q", *scripts)
+	}
+	m, _ = m.Update(prepared)
+	m, cmd = m.Update(ranMsg{preparedMsg: prepared})
+	m, _ = m.Update(cmd())
+	v := m.View()
+	if len(refreshed) != 1 || refreshed[0] != "0 [brew]" || !strings.Contains(v, "laptop: 1 of 1 installed items now match") {
+		t.Fatalf("refresh %v:\n%s", refreshed, v)
+	}
+	if strings.Contains(v, "formula › wget") || strings.Contains(v, "●") {
+		t.Errorf("installed item or mark still shown:\n%s", v)
+	}
+}
+
+// A package installed at another version than the other machine's has been
+// installed; a setting that still differs has not been applied.
+func TestStillDifferent(t *testing.T) {
+	res := &diff.Result{Sections: []diff.Section{
+		{Kind: "brew", Changed: []diff.Change{{Key: "formula › jq", A: "1.8", B: "1.7"}}},
+		{Kind: "defaults", Changed: []diff.Change{{Key: "dock › autohide", A: "true", B: "false"}}},
+		{Kind: "packages", OnlyB: []snapshot.Item{{Key: "npm › x"}}},
+	}}
+	ids := []markID{{0, "brew", "formula › jq"}, {0, "defaults", "dock › autohide"}, {0, "packages", "npm › x"}}
+	if n := stillDifferent(res, ids); n != 2 {
+		t.Fatalf("still different = %d, want 2 (the setting and the missing npm package)", n)
+	}
 }

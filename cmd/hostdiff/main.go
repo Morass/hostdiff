@@ -3,12 +3,14 @@
 package main
 
 import (
+	"bufio"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"io/fs"
 	"os"
+	"os/exec"
 	"os/user"
 	"path/filepath"
 	"regexp"
@@ -269,6 +271,134 @@ func (t *target) collect(cfg *config.Config, opt collectOpts) (*snapshot.Snapsho
 	return remote.Snapshot(t.machine, remote.Options{Only: opt.only, Skip: skip})
 }
 
+// replaceSections returns old with every section of the same kind replaced
+// by its fresh copy.
+func replaceSections(old, fresh []snapshot.Section) []snapshot.Section {
+	out := make([]snapshot.Section, 0, len(old)+len(fresh))
+	used := map[string]bool{}
+	for _, s := range old {
+		for _, f := range fresh {
+			if f.Kind == s.Kind {
+				s, used[f.Kind] = f, true
+			}
+		}
+		out = append(out, s)
+	}
+	for _, f := range fresh {
+		if !used[f.Kind] {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+// installSide says how to install on a target: live machines only.
+func (t *target) installSide(tty bool) tui.Side {
+	switch {
+	case t.file != "":
+		return tui.Side{Where: "snapshot file", NoInstall: "it is a snapshot file, not a live machine"}
+	case t.machine != nil:
+		m := t.machine
+		return tui.Side{Where: "ssh " + m.SSH, Prepare: func(script string) (*exec.Cmd, func(), error) {
+			cmd, err := remote.InstallCommand(m, script, tty)
+			return cmd, func() {}, err
+		}}
+	}
+	return tui.Side{Where: "this machine", Prepare: localInstaller}
+}
+
+// localInstaller writes the script to a private temporary folder and runs
+// it with the PATH hostdiff collects with.
+func localInstaller(script string) (*exec.Cmd, func(), error) {
+	dir, err := os.MkdirTemp("", "hostdiff-install-")
+	if err != nil {
+		return nil, nil, err
+	}
+	p := filepath.Join(dir, "install.sh")
+	if err := os.WriteFile(p, []byte(script), 0o600); err != nil {
+		os.RemoveAll(dir)
+		return nil, nil, err
+	}
+	cmd := exec.Command("/bin/sh", p)
+	cmd.Env = append(os.Environ(), "PATH="+collect.Current().Path)
+	return cmd, func() { os.RemoveAll(dir) }, nil
+}
+
+// installCLI prints what would be installed on one side, asks, runs it in
+// this terminal and shows the affected sections collected again.
+func installCLI(res *diff.Result, targets []*target, side int, yes bool, refresh func(int, []string) (*diff.Result, error), stdout, stderr io.Writer, color bool) error {
+	t, other := targets[side], targets[1-side]
+	tty := isTerminal(os.Stdin)
+	how := t.installSide(tty)
+	if how.NoInstall != "" {
+		return fmt.Errorf("cannot install on %s: %s", t.label, how.NoInstall)
+	}
+	var acts []fix.Action
+	notes := 0
+	for _, a := range fix.Plan(res, side == 0) {
+		if a.Runnable() {
+			acts = append(acts, a)
+		} else {
+			notes++
+		}
+	}
+	if len(acts) == 0 {
+		fmt.Fprintf(stdout, "Nothing hostdiff can install on %s from %s.\n", t.label, other.label)
+		return nil
+	}
+	fmt.Fprintf(stdout, "On %s (%s), to bring over what %s has:\n", t.label, how.Where, other.label)
+	for _, a := range acts {
+		fmt.Fprintln(stdout, "  "+a.Command())
+	}
+	if notes > 0 {
+		fmt.Fprintf(stdout, "(%d more differences have no install command; --script lists them)\n", notes)
+	}
+	if !yes {
+		if !tty {
+			return errors.New("add --yes to run these without a terminal to confirm in")
+		}
+		fmt.Fprintf(stdout, "Run these %d commands on %s? [y/N] ", len(acts), t.label)
+		line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+		if a := strings.ToLower(strings.TrimSpace(line)); a != "y" && a != "yes" {
+			fmt.Fprintln(stdout, "Nothing was run.")
+			return nil
+		}
+	}
+	cmd, cleanup, err := how.Prepare(fix.Installer(t.label, acts, false))
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, stdout, stderr
+	runErr := cmd.Run()
+
+	kinds := map[string]bool{}
+	var list []string
+	for _, a := range acts {
+		if !kinds[a.Kind] {
+			kinds[a.Kind] = true
+			list = append(list, a.Kind)
+		}
+	}
+	fresh, err := refresh(side, list)
+	if err != nil {
+		return fmt.Errorf("collecting %s again: %w", strings.Join(list, ", "), err)
+	}
+	shown := *fresh
+	shown.Sections = nil
+	for _, s := range fresh.Sections {
+		if kinds[s.Kind] {
+			shown.Sections = append(shown.Sections, s)
+		}
+	}
+	fmt.Fprintf(stdout, "\nCollected again on %s:\n\n", t.label)
+	render.Text(stdout, &shown, render.Options{Color: color})
+	if runErr != nil {
+		return errors.New("some install steps failed or were stopped (see above)")
+	}
+	return nil
+}
+
 // sameDevice reports, before anything is collected, when both sides would be
 // read live from the same account on the same machine: this machine twice,
 // or an ssh destination that leads back here (or to the other side's host).
@@ -344,9 +474,14 @@ func cmdDiff(args []string, stdout, stderr io.Writer) error {
 	script := fs.Bool("script", false, "")
 	doSave := fs.Bool("save", false, "")
 	noColor := fs.Bool("no-color", false, "")
+	install := fs.String("install", "", "")
+	yes := fs.Bool("yes", false, "")
 	pos, err := parse(fs, args)
 	if err != nil {
 		return err
+	}
+	if *install != "" && *script {
+		return errors.New("use --script or --install, not both")
 	}
 	if len(pos) < 1 || len(pos) > 2 {
 		return fmt.Errorf("usage: hostdiff diff A [B]")
@@ -403,7 +538,34 @@ func cmdDiff(args []string, stdout, stderr io.Writer) error {
 			}
 		}
 	}
-	res := diff.Compare(diff.Side{Label: targets[0].label, Snap: snaps[0]}, diff.Side{Label: targets[1].label, Snap: snaps[1]}, diff.Options{Only: onlyK, Ignore: cfg.Ignore})
+	compare := func() *diff.Result {
+		return diff.Compare(diff.Side{Label: targets[0].label, Snap: snaps[0]}, diff.Side{Label: targets[1].label, Snap: snaps[1]}, diff.Options{Only: onlyK, Ignore: cfg.Ignore})
+	}
+	res := compare()
+	// refresh collects some sections of one side again, after an install.
+	refresh := func(side int, kinds []string) (*diff.Result, error) {
+		fresh, err := targets[side].collect(cfg, collectOpts{only: kinds, skip: skipK})
+		if err != nil {
+			return nil, err
+		}
+		merged := *snaps[side]
+		merged.Sections = replaceSections(snaps[side].Sections, fresh.Sections)
+		snaps[side] = &merged
+		return compare(), nil
+	}
+	if *install != "" {
+		side := -1
+		for i, t := range targets {
+			if *install == pos[i] || *install == t.label || (*install == "localhost" && t.machine == nil && t.file == "") {
+				side = i
+				break
+			}
+		}
+		if side < 0 {
+			return fmt.Errorf("--install %s: name one of the two sides (%s or %s)", *install, targets[0].label, targets[1].label)
+		}
+		return installCLI(res, targets, side, *yes, refresh, stdout, stderr, !*noColor && isTerminal(stdout) && os.Getenv("NO_COLOR") == "")
+	}
 	formatSet := false
 	fs.Visit(func(f *flag.Flag) {
 		formatSet = formatSet || f.Name == "format" || f.Name == "all" || f.Name == "details"
@@ -412,7 +574,10 @@ func cmdDiff(args []string, stdout, stderr io.Writer) error {
 	case *script:
 		fmt.Fprint(stdout, fix.Script(res))
 	case !formatSet && isTerminal(stdout) && isTerminal(os.Stdin) && os.Getenv("HOSTDIFF_NO_TUI") == "":
-		return tui.Run(res)
+		return tui.Run(res, tui.Options{
+			Sides:   [2]tui.Side{targets[0].installSide(true), targets[1].installSide(true)},
+			Refresh: refresh,
+		})
 	case *format == "json":
 		if err := render.JSON(stdout, res); err != nil {
 			return err

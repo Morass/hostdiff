@@ -75,6 +75,7 @@ func newMachine(t *testing.T, home string, formulae, shortcuts string) machine {
 "list --formula") cat "$HOME/.fixture/formulae";;
 "list --cask") ;;
 "leaves --installed-on-request") cut -d' ' -f1 "$HOME/.fixture/formulae";;
+"install "*) echo "$2 9.9.9" >> "$HOME/.fixture/formulae"; echo "installed $2";;
 esac`)
 	stub("shortcuts", `[ "$2" = "--folders" ] && exit 0; cat "$HOME/.fixture/shortcuts"`)
 	stub("crontab", `exit 0`)
@@ -262,7 +263,7 @@ func TestDiffFiles(t *testing.T) {
 		t.Errorf("json: %s", js.stdout)
 	}
 	sc := w.run("diff", a, b, "--script")
-	if !strings.Contains(sc.stdout, "brew install 'wget'") || !strings.Contains(sc.stdout, "# only on a: brew uninstall 'jq'") {
+	if !strings.Contains(sc.stdout, "brew install wget") || !strings.Contains(sc.stdout, "# only on a: brew uninstall jq") {
 		t.Errorf("script:\n%s", sc.stdout)
 	}
 	only := w.run("diff", a, b, "--only", "dotfiles", "--no-color")
@@ -402,5 +403,42 @@ func TestHelp(t *testing.T) {
 	}
 	if r := w.run("diff", "x", "--only", "nosuch"); r.code != 2 || !strings.Contains(r.stderr, "unknown section") {
 		t.Errorf("unknown section: %+v", r)
+	}
+}
+
+// --install runs the shown commands on either side, this machine or over
+// ssh, and collects the section again.
+func TestInstallOnEitherSide(t *testing.T) {
+	w := newWorld(t)
+	w.remote("laptop", "jq 1.7.1\nripgrep 14.1.0\n", "", true)
+	w.writeConfig("[machines.laptop]\nssh = \"laptop\"\n")
+
+	if r := w.run("diff", "laptop", "--install", "localhost", "--only", "brew"); r.code != 2 || !strings.Contains(r.stderr, "add --yes") {
+		t.Errorf("ran without a terminal and without --yes: %+v", r)
+	}
+	here := w.run("diff", "laptop", "--install", "localhost", "--yes", "--only", "brew", "--no-color")
+	for _, want := range []string{"brew install ripgrep", "installed ripgrep", "1 of 1 done, 0 failed", "Collected again on localhost"} {
+		if !strings.Contains(here.stdout, want) {
+			t.Errorf("local install missing %q: %+v", want, here)
+		}
+	}
+	if strings.Contains(here.stdout, "▶ formula › ripgrep") || here.code != 0 {
+		t.Errorf("ripgrep still missing here: %+v", here)
+	}
+
+	there := w.run("diff", "laptop", "--install", "laptop", "--yes", "--only", "brew", "--no-color")
+	for _, want := range []string{"On laptop (ssh laptop)", "brew install node", "installed node", "1 of 1 done"} {
+		if !strings.Contains(there.stdout+there.stderr, want) {
+			t.Errorf("remote install missing %q: %+v", want, there)
+		}
+	}
+	if b, _ := os.ReadFile(filepath.Join(w.sshRoot, "laptop", ".fixture", "formulae")); !strings.Contains(string(b), "node 9.9.9") {
+		t.Errorf("node not installed on laptop: %q", b)
+	}
+	if left, _ := filepath.Glob(filepath.Join(w.root, "hostdiff-install*")); len(left) != 0 {
+		t.Errorf("installer left behind: %v", left)
+	}
+	if r := w.run("diff", "laptop", "--install", "nowhere", "--yes"); r.code != 2 || !strings.Contains(r.stderr, "name one of the two sides") {
+		t.Errorf("unknown side: %+v", r)
 	}
 }
