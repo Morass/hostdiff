@@ -244,12 +244,15 @@ func (e *Env) isProtected(p string) bool {
 	if e.OS != "darwin" {
 		return false
 	}
-	if strings.HasPrefix(p, "/Volumes/") {
+	if strings.HasPrefix(strings.ToLower(p), "/volumes/") {
 		return true
 	}
+	// APFS is case-insensitive by default: a home or Documents folder spelled
+	// with different capitals is still the same protected folder.
+	lp := strings.ToLower(p)
 	for _, d := range protectedDirs {
-		dir := e.HomePath(d)
-		if p == dir || strings.HasPrefix(p, dir+"/") {
+		dir := strings.ToLower(e.HomePath(d))
+		if lp == dir || strings.HasPrefix(lp, dir+"/") {
 			return true
 		}
 	}
@@ -264,27 +267,22 @@ func dotfiles(e *Env, s *snapshot.Section) {
 		}
 		key := "~/" + rel
 		target, protected := e.linkTarget(p)
+		link := ""
 		if target != "" {
-			key += " → " + target
+			link = " (→ " + target + ")"
 		}
 		if protected {
-			s.Add(key, "linked into a privacy-protected folder (not read)", "")
+			s.Add(key, "not read: linked into a privacy-protected folder"+link, "")
 			continue
 		}
 		b, ok := ReadFile(p, 512<<10)
 		if !ok {
-			s.Add(key, "unreadable or too large", "")
+			s.Add(key, "unreadable or too large"+link, "")
 			continue
 		}
-		s.Add(key, "", string(b))
-	}
-	// Value is a hash of the cleaned content; computed after cleaning so a
-	// redacted token does not make two identical files look different.
-	for i := range s.Items {
-		it := &s.Items[i]
-		if it.Value == "" {
-			it.Value = "content " + shortHash(cleanText(e, it.Detail))
-		}
+		// The hash is of the cleaned content, so a redacted token or a
+		// different home folder does not make identical files look different.
+		s.Add(key, "content "+shortHash(cleanText(e, string(b)))+link, string(b))
 	}
 }
 

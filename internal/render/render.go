@@ -132,6 +132,9 @@ func Text(w io.Writer, r *diff.Result, opt Options) {
 	for _, b := range blocked {
 		fmt.Fprintf(w, "%sNot compared: %s%s\n", p.dim, b, p.reset)
 	}
+	if len(blocked) > 0 {
+		fmt.Fprintf(w, "%sTip: some sections can only be read in a Terminal on that machine: run `hostdiff snap -o FILE` there, then compare the files.%s\n", p.dim, p.reset)
+	}
 }
 
 func hasContentChanges(r *diff.Result) bool {
@@ -165,14 +168,39 @@ func noteSuffix(n string) string {
 
 func counts(r *diff.Result, s *diff.Section) string {
 	var parts []string
-	if len(s.OnlyA) > 0 {
-		parts = append(parts, fmt.Sprintf("%d only on %s", len(s.OnlyA), r.A.Label))
+	onlyA, onlyB, changed, deps := 0, 0, 0, 0
+	for _, it := range s.OnlyA {
+		if it.Tag == "dependency" {
+			deps++
+		} else {
+			onlyA++
+		}
 	}
-	if len(s.OnlyB) > 0 {
-		parts = append(parts, fmt.Sprintf("%d only on %s", len(s.OnlyB), r.B.Label))
+	for _, it := range s.OnlyB {
+		if it.Tag == "dependency" {
+			deps++
+		} else {
+			onlyB++
+		}
 	}
-	if len(s.Changed) > 0 {
-		parts = append(parts, fmt.Sprintf("%d differ", len(s.Changed)))
+	for _, c := range s.Changed {
+		if c.TagA == "dependency" && c.TagB == "dependency" {
+			deps++
+		} else {
+			changed++
+		}
+	}
+	if onlyA > 0 {
+		parts = append(parts, fmt.Sprintf("%d only on %s", onlyA, r.A.Label))
+	}
+	if onlyB > 0 {
+		parts = append(parts, fmt.Sprintf("%d only on %s", onlyB, r.B.Label))
+	}
+	if changed > 0 {
+		parts = append(parts, fmt.Sprintf("%d differ", changed))
+	}
+	if deps > 0 {
+		parts = append(parts, fmt.Sprintf("%d in dependencies", deps))
 	}
 	parts = append(parts, fmt.Sprintf("%d same", len(s.Same)))
 	if s.Ignored > 0 {

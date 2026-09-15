@@ -237,3 +237,23 @@ func TestCrashingCollectorIsContained(t *testing.T) {
 		t.Fatalf("%+v", sec)
 	}
 }
+
+// On macOS a link can spell the home folder with different capitals; it is
+// still the protected Documents folder and still the home to normalise.
+func TestProtectedFolderCaseInsensitive(t *testing.T) {
+	e := sandbox(t)
+	upper := strings.Replace(e.Home, "someone", "SomeOne", 1)
+	docs := e.HomePath("Documents")
+	writeFile(t, filepath.Join(docs, "zshrc"), "echo hi\n", 0o644)
+	if err := os.Symlink(filepath.Join(upper, "Documents", "zshrc"), e.HomePath(".zshrc")); err != nil {
+		t.Fatal(err)
+	}
+	s := section(t, e, "dotfiles")
+	z := find(s, "~/.zshrc")
+	if z == nil || z.Detail != "" || !strings.HasPrefix(z.Value, "not read") {
+		t.Fatalf("differently-cased protected link was read: %+v", s.Items)
+	}
+	if strings.Contains(z.Value, "SomeOne") || !strings.Contains(z.Value, "~/Documents/zshrc") {
+		t.Errorf("home not normalised case-insensitively: %q", z.Value)
+	}
+}

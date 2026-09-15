@@ -180,7 +180,7 @@ func shortcuts(e *Env, s *snapshot.Section) {
 		return
 	}
 	if _, err := os.ReadDir(e.HomePath("Library", "Shortcuts")); errors.Is(err, fs.ErrPermission) {
-		s.Status, s.Note = snapshot.Unavailable, "macOS privacy protection blocks Shortcuts from this session; on that Mac run `hostdiff snap -o FILE` in Terminal and compare the file"
+		s.Status, s.Note = snapshot.Unavailable, "blocked by macOS privacy protection in this session"
 		return
 	}
 	out, err := e.Out("shortcuts", "list")
@@ -190,7 +190,7 @@ func shortcuts(e *Env, s *snapshot.Section) {
 	}
 	names := Lines(out)
 	if len(names) == 0 && e.SSH {
-		s.Status, s.Note = snapshot.Unavailable, "shortcuts returned nothing over ssh (it needs the login session); on that Mac run `hostdiff snap -o FILE` in Terminal and compare the file"
+		s.Status, s.Note = snapshot.Unavailable, "the shortcuts tool returns nothing over ssh"
 		return
 	}
 	folderOf := map[string]string{}

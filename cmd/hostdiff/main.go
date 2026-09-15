@@ -25,6 +25,7 @@ import (
 	"github.com/morass/hostdiff/internal/remote"
 	"github.com/morass/hostdiff/internal/render"
 	"github.com/morass/hostdiff/internal/snapshot"
+	"github.com/morass/hostdiff/internal/tui"
 )
 
 // Version is set at build time with -ldflags "-X main.Version=...".
@@ -339,9 +340,13 @@ func cmdDiff(args []string, stdout, stderr io.Writer) error {
 		}
 	}
 	res := diff.Compare(diff.Side{Label: targets[0].label, Snap: snaps[0]}, diff.Side{Label: targets[1].label, Snap: snaps[1]}, diff.Options{Only: onlyK, Ignore: cfg.Ignore})
+	formatSet := false
+	fs.Visit(func(f *flag.Flag) { formatSet = formatSet || f.Name == "format" || f.Name == "all" || f.Name == "details" })
 	switch {
 	case *script:
 		fmt.Fprint(stdout, fix.Script(res))
+	case !formatSet && isTerminal(stdout) && isTerminal(os.Stdin) && os.Getenv("HOSTDIFF_NO_TUI") == "":
+		return tui.Run(res)
 	case *format == "json":
 		if err := render.JSON(stdout, res); err != nil {
 			return err

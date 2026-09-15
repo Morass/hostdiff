@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strings"
@@ -287,9 +288,19 @@ func runOne(e *Env, c Collector) (sec snapshot.Section) {
 // secrets are redacted and the home directory becomes ~, so two machines
 // with different user names compare equal.
 func clean(e *Env, sec *snapshot.Section) {
+	var homeRe *regexp.Regexp
+	if e.Home != "" && e.Home != "/" {
+		// Case-insensitive on macOS, where /Users/Name and /Users/name are
+		// the same folder; never inside a longer name (/Users/name2).
+		flags := ""
+		if e.OS == "darwin" {
+			flags = "(?i)"
+		}
+		homeRe = regexp.MustCompile(flags + regexp.QuoteMeta(e.Home) + `(/|\b|$)`)
+	}
 	norm := func(s string) string {
-		if e.Home != "" && e.Home != "/" {
-			s = strings.ReplaceAll(s, e.Home, "~")
+		if homeRe != nil {
+			s = homeRe.ReplaceAllString(s, "~$1")
 		}
 		return strings.ToValidUTF8(s, "?")
 	}

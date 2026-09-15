@@ -26,7 +26,12 @@ machine. A and B can be:
   FILE.json     a snapshot saved with "hostdiff snap -o FILE.json"
   NAME@last     the newest snapshot saved with --save for NAME (also @prev)
 
-The exit status is 0 when nothing differs, 1 when something does, 2 on error.`,
+In a terminal, diff opens an interactive view: sections on the left, what
+differs on the right, Enter for the content diff of an item, s for the
+install script. Piped, or with --format, --all or --details, it prints text.
+
+The exit status of printed output is 0 when nothing differs, 1 when
+something does, 2 on error.`,
 		examples: `hostdiff diff laptop                  # laptop vs this machine
 hostdiff diff laptop desk --only brew,apps
 hostdiff diff laptop --details        # include changed file contents
