@@ -266,9 +266,11 @@ func (ep Endpoint) Addresses() (addrs []string, here bool) {
 	if ep.Proxied {
 		return nil, false
 	}
+	// A loopback address on another port is usually a VM or a container.
+	sshPort := ep.Port == "" || ep.Port == "22"
 	host := strings.Trim(ep.Host, "[]")
 	if strings.EqualFold(host, "localhost") {
-		return nil, true
+		return nil, sshPort
 	}
 	local := map[string]bool{}
 	if ifaddrs, err := net.InterfaceAddrs(); err == nil {
@@ -297,5 +299,5 @@ func (ep Endpoint) Addresses() (addrs []string, here bool) {
 		}
 		addrs = append(addrs, ip.String())
 	}
-	return addrs, here
+	return addrs, here && sshPort
 }

@@ -26,6 +26,8 @@ func TestResolveFindsThisMachine(t *testing.T) {
 		{"user me\nhostname ::1\nport 22\n", true},
 		{"user me\nhostname 2001:db8::10\nport 22\n", false},
 		{"user me\nhostname localhost\nport 22\nproxyjump gateway\n", false},
+		{"user me\nhostname localhost\nport 2222\n", false},
+		{"user me\nhostname 127.0.0.1\nport 2222\n", false},
 		{"user me\nhostname localhost\nport 22\nproxycommand none\n", true},
 	} {
 		ep, err := Resolve(m, fakeSSH(t, tc.out))
