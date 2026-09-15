@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/morass/hostdiff/internal/snapshot"
 )
@@ -255,5 +256,35 @@ func TestProtectedFolderCaseInsensitive(t *testing.T) {
 	}
 	if strings.Contains(z.Value, "SomeOne") || !strings.Contains(z.Value, "~/Documents/zshrc") {
 		t.Errorf("home not normalised case-insensitively: %q", z.Value)
+	}
+}
+
+func TestWithDeadline(t *testing.T) {
+	block := make(chan struct{})
+	defer close(block)
+	start := time.Now()
+	if _, done := withDeadline(50*time.Millisecond, func() error { <-block; return nil }); done || time.Since(start) > time.Second {
+		t.Fatal("a blocked call was waited for")
+	}
+	if err, done := withDeadline(time.Second, func() error { return os.ErrPermission }); !done || err != os.ErrPermission {
+		t.Fatalf("fast call: %v %v", err, done)
+	}
+}
+
+// Over ssh the Shortcuts folder must not be touched at all: here it is a
+// folder the test cannot read, and an empty answer still means unavailable.
+func TestShortcutsOverSSHNeverReadsTheFolder(t *testing.T) {
+	e := sandbox(t)
+	stub(t, e, "shortcuts", `printf 'Timer\n'`)
+	e.SSH = true
+	dir := e.HomePath("Library", "Shortcuts")
+	writeFile(t, filepath.Join(dir, "x"), "", 0o644)
+	if err := os.Chmod(dir, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(dir, 0o755)
+	s := section(t, e, "shortcuts")
+	if s.Status != snapshot.OK || find(s, "Timer") == nil {
+		t.Fatalf("over ssh the folder permission must not matter: %+v", s)
 	}
 }

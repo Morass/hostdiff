@@ -179,9 +179,23 @@ func shortcuts(e *Env, s *snapshot.Section) {
 		s.Status, s.Note = snapshot.Absent, "the shortcuts command is not available (macOS 12 or later)"
 		return
 	}
-	if _, err := os.ReadDir(e.HomePath("Library", "Shortcuts")); errors.Is(err, fs.ErrPermission) {
-		s.Status, s.Note = snapshot.Unavailable, "blocked by macOS privacy protection in this session"
-		return
+	// Over ssh, touching ~/Library/Shortcuts can block forever inside the
+	// kernel while macOS decides on privacy access, so it is never looked at;
+	// an empty list there means "not readable", not "no shortcuts". Locally
+	// the check runs with a deadline.
+	if !e.SSH {
+		err, done := withDeadline(2*time.Second, func() error {
+			_, err := os.ReadDir(e.HomePath("Library", "Shortcuts"))
+			return err
+		})
+		if !done {
+			s.Status, s.Note = snapshot.Unavailable, "macOS privacy protection did not answer in this session"
+			return
+		}
+		if errors.Is(err, fs.ErrPermission) {
+			s.Status, s.Note = snapshot.Unavailable, "blocked by macOS privacy protection in this session"
+			return
+		}
 	}
 	out, err := e.Out("shortcuts", "list")
 	if err != nil {

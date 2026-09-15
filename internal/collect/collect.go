@@ -367,3 +367,17 @@ func Kinds() []string {
 	sort.Strings(out)
 	return out
 }
+
+// withDeadline runs f and gives up waiting after d. A filesystem call that
+// macOS holds for a privacy decision cannot be cancelled, so the goroutine is
+// left behind; it ends with the process.
+func withDeadline(d time.Duration, f func() error) (err error, done bool) {
+	ch := make(chan error, 1)
+	go func() { ch <- f() }()
+	select {
+	case err = <-ch:
+		return err, true
+	case <-time.After(d):
+		return nil, false
+	}
+}
