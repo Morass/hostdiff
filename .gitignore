@@ -1,0 +1,6 @@
+# Snapshots and configs describe real machines; they never belong here.
+*.snapshot.json
+/snapshots/
+config.toml
+/hostdiff
+/dist/
