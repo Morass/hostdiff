@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -38,6 +39,56 @@ type Options struct {
 	Self string
 	// SSH is the ssh program; $HOSTDIFF_SSH overrides "ssh" (used by tests).
 	SSH string
+	// Progress, when set, receives the remote side's progress as it runs.
+	Progress func(snapshot.Progress)
+}
+
+// ProgressMarker starts the progress lines `hostdiff snap --json` writes to
+// standard error when HOSTDIFF_PROGRESS is set.
+const ProgressMarker = "HOSTDIFF-PROGRESS"
+
+// progressWriter passes progress lines to a callback and keeps the rest.
+type progressWriter struct {
+	buf     bytes.Buffer
+	pending []byte
+	fn      func(snapshot.Progress)
+}
+
+func (w *progressWriter) Write(p []byte) (int, error) {
+	w.pending = append(w.pending, p...)
+	for {
+		i := bytes.IndexByte(w.pending, '\n')
+		if i < 0 {
+			break
+		}
+		line := w.pending[:i+1]
+		if !w.progress(string(line)) {
+			w.buf.Write(line)
+		}
+		w.pending = w.pending[i+1:]
+	}
+	return len(p), nil
+}
+
+func (w *progressWriter) progress(line string) bool {
+	f := strings.Fields(line)
+	if len(f) != 5 || f[0] != ProgressMarker || !kindRe.MatchString(f[2]) {
+		return false
+	}
+	items, err := strconv.Atoi(f[3])
+	if err != nil {
+		return false
+	}
+	if w.fn != nil && (f[1] == "start" || f[1] == "done") {
+		w.fn(snapshot.Progress{Stage: f[1], Kind: f[2], Items: items, Status: snapshot.Status(f[4])})
+	}
+	return true
+}
+
+func (w *progressWriter) bytes() []byte {
+	w.buf.Write(w.pending)
+	w.pending = nil
+	return w.buf.Bytes()
 }
 
 // snapArgs builds the fixed argument string for the remote hostdiff. Section
@@ -71,16 +122,16 @@ func probeScript(m *config.Machine, args string) string {
 		if rest, ok := strings.CutPrefix(cmd, "~/"); ok {
 			cmd = `"$HOME"/` + rest
 		}
-		return fmt.Sprintf(`if [ -x %[1]s ]; then exec %[1]s %[2]s; fi; echo "%[3]s $(uname -s) $(uname -m)" >&2; exit 127`, cmd, args, missingMarker)
+		return fmt.Sprintf(`if [ -x %[1]s ]; then HOSTDIFF_PROGRESS=1 exec %[1]s %[2]s; fi; echo "%[3]s $(uname -s) $(uname -m)" >&2; exit 127`, cmd, args, missingMarker)
 	}
-	return fmt.Sprintf(`for p in "$(command -v hostdiff 2>/dev/null)" "$HOME/.local/bin/hostdiff" "$HOME/go/bin/hostdiff" /opt/homebrew/bin/hostdiff /usr/local/bin/hostdiff /home/linuxbrew/.linuxbrew/bin/hostdiff; do if [ -n "$p" ] && [ -x "$p" ]; then exec "$p" %s; fi; done; echo "%s $(uname -s) $(uname -m)" >&2; exit 127`, args, missingMarker)
+	return fmt.Sprintf(`for p in "$(command -v hostdiff 2>/dev/null)" "$HOME/.local/bin/hostdiff" "$HOME/go/bin/hostdiff" /opt/homebrew/bin/hostdiff /usr/local/bin/hostdiff /home/linuxbrew/.linuxbrew/bin/hostdiff; do if [ -n "$p" ] && [ -x "$p" ]; then HOSTDIFF_PROGRESS=1 exec "$p" %s; fi; done; echo "%s $(uname -s) $(uname -m)" >&2; exit 127`, args, missingMarker)
 }
 
 // uploadScript receives a binary on stdin into a private temporary folder,
 // runs it once and removes it, also when the connection drops or the run is
 // interrupted (only SIGKILL or a crash of the machine leaves it behind).
 func uploadScript(args string) string {
-	return fmt.Sprintf(`umask 077; d=$(mktemp -d "${TMPDIR:-/tmp}/hostdiff.XXXXXX") || exit 1; hdclean() { rm -rf "$d"; }; trap hdclean EXIT; trap "exit 129" HUP; trap "exit 130" INT; trap "exit 143" TERM; cat > "$d/hostdiff" && chmod 700 "$d/hostdiff" && "$d/hostdiff" %s`, args)
+	return fmt.Sprintf(`umask 077; d=$(mktemp -d "${TMPDIR:-/tmp}/hostdiff.XXXXXX") || exit 1; hdclean() { rm -rf "$d"; }; trap hdclean EXIT; trap "exit 129" HUP; trap "exit 130" INT; trap "exit 143" TERM; cat > "$d/hostdiff" && chmod 700 "$d/hostdiff" && HOSTDIFF_PROGRESS=1 "$d/hostdiff" %s`, args)
 }
 
 func sshProgram(opt Options) string {
@@ -98,8 +149,9 @@ func sshProgram(opt Options) string {
 // an option.
 func run(ctx context.Context, opt Options, dest, script string, stdin []byte) (stdout, stderr []byte, code int, err error) {
 	cmd := exec.CommandContext(ctx, sshProgram(opt), "-o", "ConnectTimeout=15", "-T", "--", dest, "/bin/sh -c '"+script+"'")
-	var out, errb bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &out, &errb
+	var out bytes.Buffer
+	errb := &progressWriter{fn: opt.Progress}
+	cmd.Stdout, cmd.Stderr = &out, errb
 	if stdin != nil {
 		cmd.Stdin = bytes.NewReader(stdin)
 	}
@@ -112,7 +164,7 @@ func run(ctx context.Context, opt Options, dest, script string, stdin []byte) (s
 	if ctx.Err() == context.DeadlineExceeded {
 		err = fmt.Errorf("timed out after %s", opt.Timeout)
 	}
-	return out.Bytes(), errb.Bytes(), code, err
+	return out.Bytes(), errb.bytes(), code, err
 }
 
 // Snapshot collects a snapshot from machine m.
@@ -133,8 +185,14 @@ func Snapshot(m *config.Machine, opt Options) (*snapshot.Snapshot, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), opt.Timeout)
 	defer cancel()
 
+	report := func(stage string) {
+		if opt.Progress != nil {
+			opt.Progress(snapshot.Progress{Stage: stage})
+		}
+	}
 	upload := m.Upload == "always"
 	if !upload {
+		report("connect")
 		out, errOut, code, err := run(ctx, opt, m.SSH, probeScript(m, args), nil)
 		if err != nil {
 			return nil, fmt.Errorf("%s: ssh: %w", m.Name, err)
@@ -164,6 +222,7 @@ func Snapshot(m *config.Machine, opt Options) (*snapshot.Snapshot, error) {
 	if err != nil {
 		return nil, fmt.Errorf("reading this binary to send it: %w", err)
 	}
+	report("upload")
 	out, errOut, code, err := run(ctx, opt, m.SSH, uploadScript(args), bin)
 	if err != nil {
 		return nil, fmt.Errorf("%s: ssh: %w", m.Name, err)

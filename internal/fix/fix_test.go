@@ -207,3 +207,80 @@ func TestCommandRoundTrip(t *testing.T) {
 		}
 	}
 }
+
+func TestRemoveAndUpdateCommands(t *testing.T) {
+	cases := []struct {
+		act  Action
+		ok   bool
+		verb string
+		want string
+	}{}
+	add := func(a Action, ok bool, verb, want string) {
+		cases = append(cases, struct {
+			act  Action
+			ok   bool
+			verb string
+			want string
+		}{a, ok, verb, want})
+	}
+	a, ok := ForRemove("brew", snapshot.Item{Key: "cask › alt-tab"})
+	add(a, ok, Remove, "brew uninstall --cask alt-tab")
+	a, ok = ForRemove("defaults", snapshot.Item{Key: "dock › autohide", Tag: "defaults com.apple.dock\ntype bool"})
+	add(a, ok, Reset, "defaults delete com.apple.dock autohide")
+	a, ok = ForRemove("toolchains", snapshot.Item{Key: "pyenv › 3.11.9"})
+	add(a, ok, Remove, "pyenv uninstall --force 3.11.9")
+	a, ok = ForRemove("libraries", snapshot.Item{Key: "gem › rake"})
+	add(a, ok, Remove, "gem uninstall --all --executables rake")
+	a, ok = ForUpdate("packages", "npm › typescript", "5.6.2", "", "5.4.0", "")
+	add(a, ok, Update, "npm install -g typescript@5.6.2")
+	a, ok = ForUpdate("packages", "cargo › ripgrep", "v14.1.0", "", "v13.0.0", "")
+	add(a, ok, Update, "cargo install --force --version 14.1.0 ripgrep")
+	a, ok = ForUpdate("brew", "formula › node", "26", "", "25", "")
+	add(a, ok, Update, "brew upgrade node")
+	a, ok = ForUpdate("libraries", "python3.12 › requests", "2.32.3", "user", "2.31.0", "user")
+	add(a, ok, Update, "python3.12 -m pip install --user requests==2.32.3")
+	a, ok = ForUpdate("defaults", "dock › tilesize", "48", "defaults com.apple.dock\ntype int", "36", "")
+	add(a, ok, Set, "defaults write com.apple.dock tilesize -int 48")
+	for _, c := range cases {
+		if !c.ok || c.act.Verb != c.verb || c.act.Command() != c.want {
+			t.Errorf("got %v %q %q, want %q %q", c.ok, c.act.Verb, c.act.Command(), c.verb, c.want)
+		}
+	}
+	for _, bad := range []Action{
+		func() Action { a, _ := ForUpdate("packages", "npm › x", "1.0; rm -rf ~", "", "0.9", ""); return a }(),
+		func() Action {
+			a, _ := ForRemove("libraries", snapshot.Item{Key: "python3.12 › numpy", Tag: "system"})
+			return a
+		}(),
+		func() Action {
+			a, _ := ForRemove("libraries", snapshot.Item{Key: "gem › json", Tag: "default"})
+			return a
+		}(),
+	} {
+		if bad.Runnable() || bad.Note == "" {
+			t.Errorf("should have no command, only a note: %+v", bad)
+		}
+	}
+}
+
+// Clone installs first, updates next, removes last (formulae before their
+// tap), and leaves dependencies to the package manager.
+func TestCloneOrder(t *testing.T) {
+	s := &snapshot.Snapshot{}
+	r := &diff.Result{A: diff.Side{Label: "a", Snap: s}, B: diff.Side{Label: "b", Snap: s}, Sections: []diff.Section{
+		{Kind: "brew", Comparable: true,
+			OnlyA: []snapshot.Item{{Key: "tap › owner/tools"}, {Key: "formula › jq", Tag: "requested"}, {Key: "formula › lib", Tag: "dependency"}},
+			OnlyB: []snapshot.Item{{Key: "formula › wget", Tag: "requested"}}},
+		{Kind: "packages", Comparable: true, Changed: []diff.Change{{Key: "npm › x", A: "1.0.0", B: "2.0.0"}}},
+	}}
+	var got []string
+	for _, a := range Clone(r, true) {
+		if a.Runnable() {
+			got = append(got, a.Command())
+		}
+	}
+	want := []string{"brew install wget", "npm install -g x@2.0.0", "brew uninstall jq", "brew untap owner/tools"}
+	if strings.Join(got, " | ") != strings.Join(want, " | ") {
+		t.Fatalf("clone:\n got %q\nwant %q", got, want)
+	}
+}

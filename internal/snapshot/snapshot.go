@@ -52,6 +52,16 @@ type Section struct {
 	Items  []Item `json:"items,omitempty"`
 }
 
+// Progress reports a collection while it runs.
+type Progress struct {
+	// Stage is "connect" or "upload" (reaching another machine), "start" or
+	// "done" (one section).
+	Stage  string
+	Kind   string
+	Items  int
+	Status Status
+}
+
 // Host describes the machine a snapshot came from.
 type Host struct {
 	Name string `json:"name"`

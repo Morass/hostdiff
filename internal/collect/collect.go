@@ -261,6 +261,9 @@ type Options struct {
 	Only []string
 	Skip []string
 	Tool string
+	// Progress, when set, is called as each section starts and ends, from
+	// several goroutines at once.
+	Progress func(snapshot.Progress)
 }
 
 // Snapshot runs the collectors that apply to this OS, in parallel, and returns
@@ -298,7 +301,13 @@ func Snapshot(e *Env, opt Options) *snapshot.Snapshot {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
+			if opt.Progress != nil {
+				opt.Progress(snapshot.Progress{Stage: "start", Kind: c.Kind})
+			}
 			snap.Sections[i] = runOne(e, c)
+			if opt.Progress != nil {
+				opt.Progress(snapshot.Progress{Stage: "done", Kind: c.Kind, Items: len(snap.Sections[i].Items), Status: snap.Sections[i].Status})
+			}
 		}()
 	}
 	wg.Wait()

@@ -1,8 +1,10 @@
 package tui
 
 import (
+	"errors"
 	"fmt"
 	"os/exec"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -13,29 +15,101 @@ import (
 	"github.com/morass/hostdiff/internal/snapshot"
 )
 
-func sample() *diff.Result {
-	snap := func(name string) *snapshot.Snapshot {
-		return &snapshot.Snapshot{Format: 1, Created: time.Unix(0, 0), Host: snapshot.Host{Name: name, OS: "darwin", Arch: "arm64"}}
-	}
-	return &diff.Result{
-		A: diff.Side{Label: "laptop", Snap: snap("lap")},
-		B: diff.Side{Label: "desk", Snap: snap("dsk")},
-		Sections: []diff.Section{
-			{Kind: "fonts", Title: "Fonts", Comparable: true, Same: []snapshot.Item{{Key: "Inter.ttf", Value: "user"}}},
-			{Kind: "brew", Title: "Homebrew", Comparable: true,
-				OnlyA:   []snapshot.Item{{Key: "formula › jq", Value: "1.7.1", Tag: "requested"}, {Key: "formula › oniguruma", Value: "6.9", Tag: "dependency"}},
-				OnlyB:   []snapshot.Item{{Key: "formula › wget", Value: "1.25", Tag: "requested"}},
-				Changed: []diff.Change{{Key: "formula › node", A: "26", B: "25", TagA: "requested", TagB: "requested"}},
-				Same:    []snapshot.Item{{Key: "formula › git", Value: "2.50"}}},
-			{Kind: "dotfiles", Title: "Dotfiles", Comparable: true,
-				Changed: []diff.Change{{Key: "~/.zshrc", A: "content 1", B: "content 2", DetailA: "alias ll='ls -l'\n", DetailB: "alias la='ls -la'\n"}}},
-			{Kind: "shortcuts", Title: "Shortcuts", StatusA: snapshot.Unavailable, NoteA: "over ssh", StatusB: snapshot.OK},
-			{Kind: "mas", Title: "App Store", StatusA: snapshot.Absent, StatusB: snapshot.Absent},
-		},
-	}
+// fakeBackend serves fixed snapshots of "laptop" (this machine) and "desk".
+type fakeBackend struct {
+	full      [2]*snapshot.Snapshot
+	have      [2]*snapshot.Snapshot
+	labels    [2]string
+	sides     [2]Side
+	collected []string
+	scripts   []string
+	onCollect func(side int, s *snapshot.Snapshot)
 }
 
-func send(m tea.Model, keys ...string) tea.Model {
+func sec(kind, title string, items ...snapshot.Item) snapshot.Section {
+	s := snapshot.Section{Kind: kind, Title: title, Status: snapshot.OK, Items: items}
+	s.Sort()
+	return s
+}
+
+func newFake() *fakeBackend {
+	host := func(n string) snapshot.Host { return snapshot.Host{Name: n, OS: "darwin", Arch: "arm64"} }
+	laptop := &snapshot.Snapshot{Format: 1, Created: time.Unix(0, 0), Host: host("lap"), Sections: []snapshot.Section{
+		sec("brew", "Homebrew",
+			snapshot.Item{Key: "formula › jq", Value: "1.7.1", Tag: "requested"},
+			snapshot.Item{Key: "formula › node", Value: "26", Tag: "requested"},
+			snapshot.Item{Key: "formula › git", Value: "2.50", Tag: "requested"},
+			snapshot.Item{Key: "cask › rectangle", Value: "0.87"}),
+		sec("libraries", "Language libraries",
+			snapshot.Item{Key: "python3.12 › requests", Value: "2.32.3", Tag: "user"},
+			snapshot.Item{Key: "gem › rake", Value: "13.2.1"}),
+		sec("dotfiles", "Dotfiles", snapshot.Item{Key: "~/.zshrc", Value: "content 1", Detail: "alias ll='ls -l'\n"}),
+	}}
+	desk := &snapshot.Snapshot{Format: 1, Created: time.Unix(0, 0), Host: host("dsk"), Sections: []snapshot.Section{
+		sec("brew", "Homebrew",
+			snapshot.Item{Key: "formula › wget", Value: "1.25", Tag: "requested"},
+			snapshot.Item{Key: "formula › node", Value: "25", Tag: "requested"},
+			snapshot.Item{Key: "formula › git", Value: "2.50", Tag: "requested"},
+			snapshot.Item{Key: "formula › oniguruma", Value: "6.9", Tag: "dependency"}),
+		sec("libraries", "Language libraries",
+			snapshot.Item{Key: "python3.12 › requests", Value: "2.31.0", Tag: "user"},
+			snapshot.Item{Key: "python3.12 › numpy", Value: "2.0", Tag: "system"},
+			snapshot.Item{Key: "gem › rake", Value: "13.2.1"}),
+		sec("dotfiles", "Dotfiles", snapshot.Item{Key: "~/.zshrc", Value: "content 2", Detail: "alias la='ls -la'\n"}),
+	}}
+	f := &fakeBackend{full: [2]*snapshot.Snapshot{laptop, desk}}
+	prep := func(script string) (*exec.Cmd, func(), error) {
+		f.scripts = append(f.scripts, script)
+		return exec.Command("true"), func() {}, nil
+	}
+	f.sides = [2]Side{{Where: "this machine", Prepare: prep}, {Where: "ssh desk", Prepare: prep}}
+	return f
+}
+
+func (f *fakeBackend) Here() Machine { return Machine{Name: "laptop", Where: "this machine"} }
+func (f *fakeBackend) Others() []Machine {
+	return []Machine{{Name: "desk", Where: "ssh desk"}, {Name: "box", Where: "ssh box"}}
+}
+func (f *fakeBackend) Groups() []Group {
+	return []Group{
+		{Kind: "brew", Title: "Homebrew", Reads: "brew list"},
+		{Kind: "libraries", Title: "Language libraries", Reads: "python, gems"},
+		{Kind: "dotfiles", Title: "Dotfiles", Reads: "shell files"},
+	}
+}
+func (f *fakeBackend) Select(a, b string) error {
+	if a == b {
+		return errors.New(a + " and " + b + " are the same machine")
+	}
+	f.labels = [2]string{a, b}
+	return nil
+}
+func (f *fakeBackend) Labels() [2]string { return f.labels }
+func (f *fakeBackend) Collect(side int, kinds []string, progress func(snapshot.Progress)) error {
+	f.collected = append(f.collected, fmt.Sprint(side, kinds))
+	if f.onCollect != nil {
+		f.onCollect(side, f.full[side])
+	}
+	out := &snapshot.Snapshot{Format: 1, Host: f.full[side].Host}
+	for _, s := range f.full[side].Sections {
+		if slices.Contains(kinds, s.Kind) {
+			if progress != nil {
+				progress(snapshot.Progress{Stage: "start", Kind: s.Kind})
+				progress(snapshot.Progress{Stage: "done", Kind: s.Kind, Items: len(s.Items), Status: s.Status})
+			}
+			out.Sections = append(out.Sections, s)
+		}
+	}
+	f.have[side] = out
+	return nil
+}
+func (f *fakeBackend) Result(kinds []string) *diff.Result {
+	return diff.Compare(diff.Side{Label: f.labels[0], Snap: f.have[0]}, diff.Side{Label: f.labels[1], Snap: f.have[1]}, diff.Options{Only: kinds})
+}
+func (f *fakeBackend) Side(side int) Side { return f.sides[side] }
+
+func press(a *App, keys ...string) tea.Cmd {
+	var last tea.Cmd
 	for _, k := range keys {
 		var msg tea.KeyMsg
 		switch k {
@@ -45,194 +119,234 @@ func send(m tea.Model, keys ...string) tea.Model {
 			msg = tea.KeyMsg{Type: tea.KeyEsc}
 		case "tab":
 			msg = tea.KeyMsg{Type: tea.KeyTab}
-		case "down":
-			msg = tea.KeyMsg{Type: tea.KeyDown}
-		case "backspace":
-			msg = tea.KeyMsg{Type: tea.KeyBackspace}
 		case "space":
 			msg = tea.KeyMsg{Type: tea.KeySpace, Runes: []rune{' '}}
+		case "backspace":
+			msg = tea.KeyMsg{Type: tea.KeyBackspace}
 		default:
 			msg = tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(k)}
 		}
-		m, _ = m.Update(msg)
+		_, last = a.Update(msg)
 	}
-	return m
+	return last
 }
 
-func start() tea.Model {
-	m, _ := New(sample(), Options{}).Update(tea.WindowSizeMsg{Width: 120, Height: 24})
-	return m
-}
-
-func startWith(opt Options) tea.Model {
-	m, _ := New(sample(), opt).Update(tea.WindowSizeMsg{Width: 120, Height: 24})
-	return m
-}
-
-func TestOpensOnFirstDifferenceAndHidesAbsent(t *testing.T) {
-	v := start().View()
-	if !strings.Contains(v, "◀ formula › jq") || !strings.Contains(v, "▶ formula › wget") || !strings.Contains(v, "26 │ 25") {
-		t.Fatalf("brew not shown first:\n%s", v)
-	}
-	if strings.Contains(v, "oniguruma") {
-		t.Errorf("dependency shown by default:\n%s", v)
-	}
-	if strings.Contains(v, "App Store") {
-		t.Errorf("section absent on both sides listed:\n%s", v)
-	}
-	if strings.Contains(v, "formula › git") {
-		t.Errorf("same items shown by default")
-	}
-}
-
-func TestTogglesAndFilter(t *testing.T) {
-	m := send(start(), "d", "a")
-	v := m.View()
-	if !strings.Contains(v, "oniguruma") || !strings.Contains(v, "formula › git") {
-		t.Fatalf("toggles:\n%s", v)
-	}
-	m = send(start(), "/", "w", "g", "enter")
-	v = m.View()
-	if strings.Contains(v, "formula › jq") || !strings.Contains(v, "formula › wget") || !strings.Contains(v, "filter: wg") {
-		t.Fatalf("filter:\n%s", v)
-	}
-	m = send(m, "/", "esc")
-	if !strings.Contains(m.View(), "formula › jq") {
-		t.Fatal("esc did not clear the filter")
-	}
-}
-
-func TestDetailShowsContentDiff(t *testing.T) {
-	// Down to Dotfiles, into the list, open the item.
-	m := send(start(), "down", "enter", "enter")
-	v := m.View()
-	if !strings.Contains(v, "-alias ll='ls -l'") || !strings.Contains(v, "+alias la='ls -la'") {
-		t.Fatalf("content diff missing:\n%s", v)
-	}
-	m = send(m, "esc")
-	if strings.Contains(m.View(), "+alias") {
-		t.Fatal("esc did not close the detail")
-	}
-}
-
-func TestKeyBurstIsSplit(t *testing.T) {
-	// "jj" arriving as one message must move twice, like two presses.
-	one := send(start(), "tab", "j", "j")
-	burst := send(start(), "tab", "jj")
-	if one.(Model).row != burst.(Model).row || burst.(Model).row != 2 {
-		t.Fatalf("burst row %d, separate row %d", burst.(Model).row, one.(Model).row)
-	}
-}
-
-func TestUnavailableSectionExplains(t *testing.T) {
-	m := send(start(), "down", "down")
-	v := m.View()
-	if !strings.Contains(v, "could not be compared") || !strings.Contains(v, "hostdiff snap -o FILE") {
-		t.Fatalf("unavailable section:\n%s", v)
-	}
-}
-
-func TestScriptView(t *testing.T) {
-	v := send(start(), "s").View()
-	if !strings.Contains(v, "brew install wget") || !strings.Contains(v, "Script to make laptop more like desk") {
-		t.Fatalf("script view:\n%s", v)
-	}
-}
-
-func TestSmallWindowDoesNotPanic(t *testing.T) {
-	m, _ := New(sample(), Options{}).Update(tea.WindowSizeMsg{Width: 20, Height: 5})
-	m = send(m, "tab", "G", "enter", "j", "esc", "/", "x", "enter")
-	_ = m.View()
-}
-
-func installable() (Options, *[]string) {
-	var scripts []string
-	prep := func(script string) (*exec.Cmd, func(), error) {
-		scripts = append(scripts, script)
-		return exec.Command("true"), func() {}, nil
-	}
-	return Options{Sides: [2]Side{{Where: "this machine", Prepare: prep}, {Where: "ssh desk", Prepare: prep}}}, &scripts
-}
-
-// Rows in brew: ◀ jq (only laptop, goes to desk), ▶ wget (goes to laptop),
-// ≠ node (a version difference: nothing to install).
-func TestMarkAndPlanBothSides(t *testing.T) {
-	opt, _ := installable()
-	m := send(startWith(opt), "tab", "space", "j", "space")
-	v := m.View()
-	if !strings.Contains(v, "marked") || !strings.Contains(v, "●") {
-		t.Fatalf("marks not shown:\n%s", v)
-	}
-	m = send(m, "j", "space")
-	if !strings.Contains(m.View(), "version differs") {
-		t.Errorf("unmarkable row not explained:\n%s", m.View())
-	}
-	v = send(m, "i").View()
-	for _, want := range []string{"On laptop (this machine), 1 commands:", "brew install wget", "On desk (ssh desk), 1 commands:", "brew install jq", "y runs them"} {
-		if !strings.Contains(v, want) {
-			t.Errorf("plan missing %q:\n%s", want, v)
+// scanned drains the collection started by the app until the comparison is
+// shown.
+func scanned(t *testing.T, a *App) {
+	t.Helper()
+	for a.screen == screenScan {
+		select {
+		case msg := <-a.ch:
+			a.Update(msg)
+		case <-time.After(5 * time.Second):
+			t.Fatal("scan never finished")
 		}
 	}
-	if v := send(m, "x", "i").View(); !strings.Contains(v, "mark items with space first") {
-		t.Errorf("x did not clear:\n%s", v)
+}
+
+func started(t *testing.T, f *fakeBackend, st Start) *App {
+	t.Helper()
+	a := newApp(f, st)
+	a.Update(tea.WindowSizeMsg{Width: 130, Height: 30})
+	a.Init()
+	scanned(t, a)
+	return a
+}
+
+func must(t *testing.T, view string, want ...string) {
+	t.Helper()
+	for _, w := range want {
+		if !strings.Contains(view, w) {
+			t.Errorf("missing %q in:\n%s", w, view)
+		}
 	}
 }
 
-func TestSectionMarkAndSnapshotSide(t *testing.T) {
-	opt, _ := installable()
-	opt.Sides[1] = Side{Where: "snapshot file", NoInstall: "it is a snapshot file"}
-	m := send(startWith(opt), "space")
-	if v := m.View(); !strings.Contains(v, "marked 1 items in Homebrew") {
-		t.Errorf("section mark (only wget can go to the live side):\n%s", v)
+func TestGuidedFlowPicksMachineAndGroups(t *testing.T) {
+	f := newFake()
+	a := newApp(f, Start{})
+	a.Update(tea.WindowSizeMsg{Width: 130, Height: 30})
+	must(t, a.View(), "◀ laptop", "Compare with:", "desk", "ssh box")
+	press(a, "enter")
+	must(t, a.View(), "What should be compared?", "laptop and desk", "Homebrew", "nothing selected")
+	press(a, "space", "enter")
+	if a.screen != screenScan || !strings.Contains(a.View(), "Scanning") {
+		t.Fatalf("not scanning:\n%s", a.View())
 	}
-	m = send(startWith(opt), "tab", "space")
-	if v := m.View(); !strings.Contains(v, "cannot install on desk: it is a snapshot file") {
-		t.Errorf("snapshot side not refused:\n%s", v)
+	scanned(t, a)
+	if len(f.collected) != 2 || f.collected[0] != "0 [brew]" && f.collected[1] != "0 [brew]" {
+		t.Errorf("collected %v, want brew on both sides", f.collected)
+	}
+	v := a.View()
+	must(t, v, "Homebrew", "formula › jq", "1.7.1", "—", "formula › node", "26", "25")
+	if strings.Contains(v, "Dotfiles") || strings.Contains(v, "oniguruma") {
+		t.Errorf("ungrouped section or dependency shown:\n%s", v)
 	}
 }
 
-// y prepares the installer, runs it, collects again and reports what now
-// matches; the marks go away.
-func TestInstallRunsAndRefreshes(t *testing.T) {
-	opt, scripts := installable()
-	var refreshed []string
-	opt.Refresh = func(side int, kinds []string) (*diff.Result, error) {
-		refreshed = append(refreshed, fmt.Sprint(side, kinds))
-		r := sample()
-		r.Sections[1].OnlyB = nil // wget is now on laptop too
-		return r, nil
+func TestSameMachineIsExplained(t *testing.T) {
+	a := newApp(newFake(), Start{B: "laptop"})
+	a.Update(tea.WindowSizeMsg{Width: 100, Height: 20})
+	must(t, a.View(), "Could not compare", "same machine")
+}
+
+func TestChildGroupsSplitASection(t *testing.T) {
+	a := started(t, newFake(), Start{B: "desk", Kinds: []string{"libraries"}})
+	press(a, "j") // gem
+	must(t, a.View(), "gem", "python3.12", "No differences.")
+	press(a, "j") // python3.12
+	v := a.View()
+	must(t, v, "requests", "2.32.3", "2.31.0", "numpy")
+	if strings.Contains(v, "python3.12 › requests") {
+		t.Errorf("group prefix not stripped in the table:\n%s", v)
 	}
-	m := send(startWith(opt), "tab", "j", "space", "i")
-	m, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
-	if cmd == nil || !strings.Contains(m.View(), "installing") {
-		t.Fatalf("y did not start:\n%s", m.View())
+}
+
+func run(t *testing.T, a *App, cmd tea.Cmd) {
+	t.Helper()
+	if cmd == nil {
+		t.Fatalf("nothing started:\n%s", a.View())
 	}
 	prepared := cmd().(preparedMsg)
-	if len(*scripts) != 1 || !strings.Contains((*scripts)[0], "'brew' 'install' 'wget'") {
-		t.Fatalf("installer script: %q", *scripts)
+	_, exec := a.Update(prepared)
+	if exec == nil {
+		t.Fatalf("not executed: %+v\n%s", prepared.err, a.View())
 	}
-	m, _ = m.Update(prepared)
-	m, cmd = m.Update(ranMsg{preparedMsg: prepared})
-	m, _ = m.Update(cmd())
-	v := m.View()
-	if len(refreshed) != 1 || refreshed[0] != "0 [brew]" || !strings.Contains(v, "laptop: 1 of 1 installed items now match") {
-		t.Fatalf("refresh %v:\n%s", refreshed, v)
+	_, refresh := a.Update(ranMsg{preparedMsg: prepared})
+	a.Update(refresh())
+}
+
+func TestRemoveOneItem(t *testing.T) {
+	f := newFake()
+	a := started(t, f, Start{B: "desk", Kinds: []string{"brew"}})
+	// Rows: ◀ cask › rectangle, ◀ formula › jq, ▶ formula › wget, ≠ formula › node.
+	press(a, "tab", "j", "enter")
+	must(t, a.View(), "formula › jq", "Install on desk", "Remove from laptop")
+	press(a, "j", "enter")
+	must(t, a.View(), "On laptop (this machine):", "Remove (1):", "brew uninstall jq", "y run")
+	f.onCollect = func(side int, s *snapshot.Snapshot) {
+		if side == 0 {
+			items := s.Sections[0].Items[:0]
+			for _, it := range s.Sections[0].Items {
+				if it.Key != "formula › jq" {
+					items = append(items, it)
+				}
+			}
+			s.Sections[0].Items = items
+		}
 	}
-	if strings.Contains(v, "formula › wget") || strings.Contains(v, "●") {
-		t.Errorf("installed item or mark still shown:\n%s", v)
+	run(t, a, press(a, "y"))
+	if !strings.Contains(f.scripts[0], "'brew' 'uninstall' 'jq'") || f.collected[len(f.collected)-1] != "0 [brew]" {
+		t.Errorf("script %q, collected %v", f.scripts, f.collected)
+	}
+	v := a.View()
+	must(t, v, "laptop: 1 of 1 removed")
+	if strings.Contains(v, "formula › jq") {
+		t.Errorf("removed item still listed:\n%s", v)
 	}
 }
 
-// A package installed at another version than the other machine's has been
-// installed; a setting that still differs has not been applied.
-func TestStillDifferent(t *testing.T) {
-	res := &diff.Result{Sections: []diff.Section{
-		{Kind: "brew", Changed: []diff.Change{{Key: "formula › jq", A: "1.8", B: "1.7"}}},
-		{Kind: "defaults", Changed: []diff.Change{{Key: "dock › autohide", A: "true", B: "false"}}},
-		{Kind: "packages", OnlyB: []snapshot.Item{{Key: "npm › x"}}},
-	}}
-	ids := []markID{{0, "brew", "formula › jq"}, {0, "defaults", "dock › autohide"}, {0, "packages", "npm › x"}}
-	if n := stillDifferent(res, ids); n != 2 {
-		t.Fatalf("still different = %d, want 2 (the setting and the missing npm package)", n)
+func TestSelectionAggregatesActions(t *testing.T) {
+	a := started(t, newFake(), Start{B: "desk", Kinds: []string{"brew"}})
+	press(a, "tab", "space", "space", "space", "enter")
+	must(t, a.View(), "3 selected items", "Install on laptop", "Install on desk (2)", "Remove from laptop (2)", "Remove from desk")
+}
+
+func TestUpdateToOtherVersion(t *testing.T) {
+	a := started(t, newFake(), Start{B: "desk", Kinds: []string{"brew"}})
+	press(a, "tab", "j", "j", "j", "enter")
+	must(t, a.View(), "Update on laptop to desk's version", "Update on desk to laptop's version", "Remove from laptop", "Remove from desk")
+	press(a, "enter")
+	must(t, a.View(), "Update (1):", "brew upgrade node")
+}
+
+func TestCloneAsksToTypeYesWhenRemoving(t *testing.T) {
+	f := newFake()
+	a := started(t, f, Start{B: "desk", Kinds: []string{"brew"}})
+	press(a, "C")
+	must(t, a.View(), "Make laptop like desk: 1 install, 1 update, 2 remove", "Make desk like laptop")
+	press(a, "enter")
+	must(t, a.View(), "type yes", "brew install wget", "brew upgrade node", "brew uninstall jq", "brew uninstall --cask rectangle", "This removes 2 items from laptop")
+	if cmd := press(a, "y", "enter"); cmd != nil || a.view.confirm == nil {
+		t.Fatal("clone ran without yes typed out")
 	}
+	press(a, "y", "e", "s")
+	run(t, a, press(a, "enter"))
+	if len(f.scripts) != 1 {
+		t.Fatalf("scripts: %v", f.scripts)
+	}
+	s := f.scripts[0]
+	if strings.Index(s, "'install' 'wget'") > strings.Index(s, "'uninstall'") {
+		t.Errorf("removals must come after installs:\n%s", s)
+	}
+	must(t, a.View(), "laptop: ")
+}
+
+func TestSnapshotSideCannotChange(t *testing.T) {
+	f := newFake()
+	f.sides[1] = Side{Where: "snapshot file", NoInstall: "it is a snapshot file"}
+	a := started(t, f, Start{B: "desk", Kinds: []string{"brew"}})
+	press(a, "tab", "enter")
+	must(t, a.View(), "Install on desk · cannot change desk: it is a snapshot file")
+	press(a, "enter")
+	if a.view.confirm != nil {
+		t.Fatal("confirmation opened for a snapshot side")
+	}
+	must(t, a.View(), "cannot change desk")
+}
+
+func TestReadOnlyView(t *testing.T) {
+	f := newFake()
+	f.sides = [2]Side{}
+	a := started(t, f, Start{B: "desk", Kinds: []string{"brew", "dotfiles"}})
+	if strings.Contains(a.View(), "space select") {
+		t.Errorf("change keys offered in a read-only view:\n%s", a.View())
+	}
+	press(a, "tab", "enter")
+	must(t, a.View(), "changes are not available")
+}
+
+func TestDetailsScriptAndBackToGroups(t *testing.T) {
+	f := newFake()
+	a := started(t, f, Start{B: "desk", Kinds: []string{"brew", "dotfiles"}})
+	press(a, "J", "tab", "v")
+	must(t, a.View(), "-alias ll='ls -l'", "+alias la='ls -la'")
+	press(a, "esc", "s")
+	must(t, a.View(), "brew install wget")
+	press(a, "esc", "c")
+	if a.screen != screenGroups || !a.gsel["brew"] || !a.gsel["dotfiles"] || a.gsel["libraries"] {
+		t.Fatalf("groups screen with the current choice: %v\n%s", a.gsel, a.View())
+	}
+	press(a, "enter")
+	scanned(t, a)
+	press(a, "m")
+	must(t, a.View(), "Compare with:")
+}
+
+func TestFilterAndSame(t *testing.T) {
+	a := started(t, newFake(), Start{B: "desk", Kinds: []string{"brew"}})
+	press(a, "a")
+	must(t, a.View(), "formula › git")
+	press(a, "/", "w", "g", "enter")
+	v := a.View()
+	must(t, v, "formula › wget", "filter: wg")
+	if strings.Contains(v, "formula › jq") {
+		t.Errorf("filter:\n%s", v)
+	}
+}
+
+func TestKeyBurstAndTinyWindow(t *testing.T) {
+	a := started(t, newFake(), Start{B: "desk", Kinds: []string{"brew", "libraries", "dotfiles"}})
+	one := started(t, newFake(), Start{B: "desk", Kinds: []string{"brew", "libraries", "dotfiles"}})
+	press(a, "tab", "jj")
+	press(one, "tab", "j", "j")
+	if a.view.row != one.view.row || a.view.row != 2 {
+		t.Fatalf("burst row %d, separate %d", a.view.row, one.view.row)
+	}
+	a.Update(tea.WindowSizeMsg{Width: 20, Height: 5})
+	press(a, "G", "enter", "j", "enter", "esc", "esc", "C", "esc", "/", "x", "enter", "c")
+	_ = a.View()
+	press(a, "esc")
+	_ = a.View()
 }

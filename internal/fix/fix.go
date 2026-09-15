@@ -38,9 +38,20 @@ var (
 type Action struct {
 	Kind string
 	Key  string
+	// Verb is what the action does: install, update, remove, set or reset.
+	Verb string
 	Argv []string
 	Note string
 }
+
+// Verbs.
+const (
+	Install = "install"
+	Update  = "update"
+	Remove  = "remove"
+	Set     = "set"
+	Reset   = "reset"
+)
 
 // Runnable reports whether the action has a command.
 func (a Action) Runnable() bool { return len(a.Argv) > 0 }
@@ -90,7 +101,8 @@ func skipped(kind, key, why string) Action {
 // ForMissing returns what brings over an item that only the other machine
 // has. The second result is false when hostdiff has nothing to say about
 // this kind of item at all (a font, a launch agent).
-func ForMissing(kind string, it snapshot.Item) (Action, bool) {
+func ForMissing(kind string, it snapshot.Item) (a Action, ok bool) {
+	defer func() { a.Verb = verb(kind, Install) }()
 	key := it.Key
 	prefixed := func(prefix string, cmd ...string) (Action, bool) {
 		n, ok := strings.CutPrefix(key, prefix)
@@ -153,7 +165,8 @@ func ForMissing(kind string, it snapshot.Item) (Action, bool) {
 
 // ForChange returns what makes the machine that has c's "have" side match
 // the "want" side.
-func ForChange(kind string, key, want, wantTag, have, haveTag string) (Action, bool) {
+func ForChange(kind string, key, want, wantTag, have, haveTag string) (a Action, ok bool) {
+	defer func() { a.Verb = verb(kind, Update) }()
 	switch kind {
 	case "defaults":
 		return writeDefault(key, want, wantTag), true
@@ -161,9 +174,315 @@ func ForChange(kind string, key, want, wantTag, have, haveTag string) (Action, b
 		if wantTag == "dependency" && haveTag == "dependency" {
 			return Action{}, false
 		}
-		return note(kind, key, "version differs: %s here, %s there (not changed automatically)", comment(have), comment(want)), true
+		return note(kind, key, "version differs: %s here, %s there (not updated by the script)", comment(have), comment(want)), true
 	}
 	return Action{}, false
+}
+
+// verb names settings changes as set and reset.
+func verb(kind, v string) string {
+	if kind != "defaults" {
+		return v
+	}
+	if v == Remove {
+		return Reset
+	}
+	return Set
+}
+
+// ForRemove returns what removes an item from the machine that has it.
+func ForRemove(kind string, it snapshot.Item) (a Action, ok bool) {
+	defer func() { a.Verb = verb(kind, Remove) }()
+	key := it.Key
+	prefixed := func(prefix string, cmd ...string) (Action, bool) {
+		n, ok := strings.CutPrefix(key, prefix)
+		if !ok {
+			return Action{}, false
+		}
+		if !pkgRe.MatchString(n) {
+			return skipped(kind, key, "unusual characters"), true
+		}
+		return run(kind, key, append(cmd, n)...), true
+	}
+	first := func(options ...func() (Action, bool)) (Action, bool) {
+		for _, o := range options {
+			if a, ok := o(); ok {
+				return a, true
+			}
+		}
+		return Action{}, false
+	}
+	switch kind {
+	case "brew":
+		return first(
+			func() (Action, bool) { return prefixed("formula › ", "brew", "uninstall") },
+			func() (Action, bool) { return prefixed("cask › ", "brew", "uninstall", "--cask") },
+			func() (Action, bool) { return prefixed("tap › ", "brew", "untap") },
+		)
+	case "mas":
+		if id, ok := strings.CutPrefix(it.Tag, "id "); ok && digitsRe.MatchString(id) {
+			return run(kind, key, "sudo", "mas", "uninstall", id), true
+		}
+		return skipped(kind, key, "no App Store id"), true
+	case "packages":
+		return first(
+			func() (Action, bool) { return prefixed("npm › ", "npm", "uninstall", "-g") },
+			func() (Action, bool) { return prefixed("pnpm › ", "pnpm", "remove", "-g") },
+			func() (Action, bool) { return prefixed("pipx › ", "pipx", "uninstall") },
+			func() (Action, bool) { return prefixed("uv › ", "uv", "tool", "uninstall") },
+			func() (Action, bool) { return prefixed("cargo › ", "cargo", "uninstall") },
+			func() (Action, bool) { return prefixed("gh › ", "gh", "extension", "remove") },
+			func() (Action, bool) { return prefixed("dotnet › ", "dotnet", "tool", "uninstall", "-g") },
+		)
+	case "editors":
+		return first(
+			func() (Action, bool) { return prefixed("vscode › ", "code", "--uninstall-extension") },
+			func() (Action, bool) { return prefixed("cursor › ", "cursor", "--uninstall-extension") },
+			func() (Action, bool) { return prefixed("vscodium › ", "codium", "--uninstall-extension") },
+		)
+	case "defaults":
+		domain, _ := defaultsTag(it.Tag)
+		_, k, found := strings.Cut(key, " › ")
+		if !found || domain == "" {
+			return skipped(kind, key, "not a simple value"), true
+		}
+		if !domainRe.MatchString(domain) || !defKeyRe.MatchString(k) {
+			return skipped(kind, key, "unusual characters"), true
+		}
+		return run(kind, key, "defaults", "delete", domain, k), true
+	case "libraries":
+		return removeLibrary(key, it.Tag)
+	case "toolchains":
+		return removeToolchain(key)
+	case "apps":
+		return note(kind, key, "move the app to the Trash yourself (or remove its cask under Homebrew)"), true
+	}
+	return Action{}, false
+}
+
+// ForUpdate returns what brings the version (or value) the machine has, have,
+// to the other machine's, want. Where a tool cannot install a given version,
+// it upgrades to the newest instead and the command says so.
+func ForUpdate(kind, key, want, wantTag, have, haveTag string) (a Action, ok bool) {
+	defer func() { a.Verb = verb(kind, Update) }()
+	label, name, hasLabel := strings.Cut(key, " › ")
+	v := strings.TrimPrefix(want, "v")
+	if !versionRe.MatchString(v) {
+		v = ""
+	}
+	pinned := func(cmd ...string) (Action, bool) {
+		if !pkgRe.MatchString(name) {
+			return skipped(kind, key, "unusual characters"), true
+		}
+		if v == "" {
+			return note(kind, key, "the other version (%s) is not a single version", comment(want)), true
+		}
+		return run(kind, key, cmd...), true
+	}
+	switch kind {
+	case "defaults":
+		return writeDefault(key, want, wantTag), true
+	case "brew":
+		if !hasLabel || !pkgRe.MatchString(name) {
+			return Action{}, false
+		}
+		switch label {
+		case "formula":
+			return run(kind, key, "brew", "upgrade", name), true
+		case "cask":
+			return run(kind, key, "brew", "upgrade", "--cask", name), true
+		}
+	case "mas":
+		tag := haveTag
+		if tag == "" {
+			tag = wantTag
+		}
+		if id, found := strings.CutPrefix(tag, "id "); found && digitsRe.MatchString(id) {
+			return run(kind, key, "mas", "upgrade", id), true
+		}
+	case "packages":
+		switch label {
+		case "npm":
+			return pinned("npm", "install", "-g", name+"@"+v)
+		case "pnpm":
+			return pinned("pnpm", "add", "-g", name+"@"+v)
+		case "pipx":
+			return pinned("pipx", "install", "--force", name+"=="+v)
+		case "uv":
+			return pinned("uv", "tool", "install", "--force", name+"=="+v)
+		case "cargo":
+			return pinned("cargo", "install", "--force", "--version", v, name)
+		case "gh":
+			if pkgRe.MatchString(name) {
+				return run(kind, key, "gh", "extension", "upgrade", name), true
+			}
+		case "dotnet":
+			return pinned("dotnet", "tool", "update", "-g", name, "--version", v)
+		}
+	case "editors":
+		cli := map[string]string{"vscode": "code", "cursor": "cursor", "vscodium": "codium"}[label]
+		if cli != "" {
+			return pinned(cli, "--install-extension", name+"@"+v, "--force")
+		}
+	case "libraries":
+		switch {
+		case pyLabelRe.MatchString(label):
+			if haveTag != "user" && wantTag != "user" {
+				return note(kind, key, "installed system-wide; update it the way that %s is managed", label), true
+			}
+			return pinned(label, "-m", "pip", "install", "--user", name+"=="+v)
+		case label == "gem":
+			return pinned("gem", "install", name, "-v", v)
+		case label == "composer":
+			return pinned("composer", "global", "require", name+":"+want)
+		case label == "luarocks":
+			return pinned("luarocks", "install", name, v)
+		case label == "dart":
+			return pinned("dart", "pub", "global", "activate", name, v)
+		case label == "perl" && perlNameRe.MatchString(name):
+			return pinned("cpanm", name+"@"+v)
+		}
+		return note(kind, key, "no generic command to install a given version"), true
+	case "apps":
+		return note(kind, key, "update the app itself (or its cask under Homebrew)"), true
+	}
+	return Action{}, false
+}
+
+// Clone returns everything that makes one side like the other within the
+// compared sections: onA true changes A to match B. Installs come first,
+// then updates and settings, removals last.
+func Clone(r *diff.Result, onA bool) []Action {
+	var installs, updates, removals []Action
+	for i := range r.Sections {
+		s := &r.Sections[i]
+		if !s.Comparable {
+			continue
+		}
+		missing, extra := s.OnlyA, s.OnlyB
+		if onA {
+			missing, extra = s.OnlyB, s.OnlyA
+		}
+		var in []Action
+		for _, it := range missing {
+			if a, ok := ForMissing(s.Kind, it); ok {
+				in = append(in, a)
+			}
+		}
+		sort.SliceStable(in, func(i, j int) bool { return brewOrder(in[i].Key) < brewOrder(in[j].Key) })
+		installs = append(installs, in...)
+		for _, c := range s.Changed {
+			want, wantTag, have, haveTag := c.A, c.TagA, c.B, c.TagB
+			if onA {
+				want, wantTag, have, haveTag = c.B, c.TagB, c.A, c.TagA
+			}
+			if a, ok := ForUpdate(s.Kind, c.Key, want, wantTag, have, haveTag); ok {
+				updates = append(updates, a)
+			}
+		}
+		var out []Action
+		for _, it := range extra {
+			if s.Kind == "brew" && it.Tag == "dependency" {
+				continue // leaves with whatever needed it
+			}
+			if a, ok := ForRemove(s.Kind, it); ok {
+				out = append(out, a)
+			}
+		}
+		// Casks and formulae before the taps they came from.
+		sort.SliceStable(out, func(i, j int) bool { return brewOrder(out[i].Key) > brewOrder(out[j].Key) })
+		removals = append(removals, out...)
+	}
+	return append(append(installs, updates...), removals...)
+}
+
+func removeLibrary(key, tag string) (Action, bool) {
+	const kind = "libraries"
+	label, name, ok := strings.Cut(key, " › ")
+	if !ok {
+		return Action{}, false
+	}
+	valid := func(re *regexp.Regexp, argv ...string) (Action, bool) {
+		if !re.MatchString(name) {
+			return skipped(kind, key, "unusual characters"), true
+		}
+		return run(kind, key, argv...), true
+	}
+	switch {
+	case pyLabelRe.MatchString(label):
+		if tag != "user" {
+			return note(kind, key, "installed system-wide; remove it the way that %s is managed", label), true
+		}
+		return valid(pkgRe, label, "-m", "pip", "uninstall", "--yes", name)
+	case label == "gem":
+		if tag == "default" {
+			return note(kind, key, "ships with Ruby"), true
+		}
+		return valid(pkgRe, "gem", "uninstall", "--all", "--executables", name)
+	case label == "perl":
+		return valid(perlNameRe, "cpanm", "--uninstall", "--force", name)
+	case label == "composer":
+		return valid(pkgRe, "composer", "global", "remove", name)
+	case label == "R":
+		return valid(rNameRe, "Rscript", "-e", "remove.packages('"+name+"')")
+	case strings.HasPrefix(label, "julia "):
+		return valid(juliaNameRe, "julia", "-e", `using Pkg; Pkg.rm("`+name+`")`)
+	case label == "luarocks":
+		return valid(pkgRe, "luarocks", "remove", name)
+	case label == "dart":
+		return valid(pkgRe, "dart", "pub", "global", "deactivate", name)
+	}
+	return Action{}, false
+}
+
+func removeToolchain(key string) (Action, bool) {
+	const kind = "toolchains"
+	label, name, ok := strings.Cut(key, " › ")
+	if !ok {
+		return Action{}, false
+	}
+	fields := strings.Fields(name)
+	valid := len(fields) > 0
+	for _, f := range fields {
+		valid = valid && versionRe.MatchString(f)
+	}
+	if !valid {
+		return skipped(kind, key, "unusual characters"), true
+	}
+	switch label {
+	case "pyenv":
+		return run(kind, key, "pyenv", "uninstall", "--force", name), true
+	case "rbenv":
+		return run(kind, key, "rbenv", "uninstall", "--force", name), true
+	case "rustup":
+		return run(kind, key, "rustup", "toolchain", "uninstall", name), true
+	case "asdf":
+		if len(fields) == 2 {
+			return run(kind, key, "asdf", "uninstall", fields[0], fields[1]), true
+		}
+	case "mise":
+		if len(fields) == 2 {
+			return run(kind, key, "mise", "uninstall", fields[0]+"@"+fields[1]), true
+		}
+	case "uv python":
+		return run(kind, key, "uv", "python", "uninstall", name), true
+	case "nvm":
+		return note(kind, key, "nvm is a shell function: run nvm uninstall %s in your shell", name), true
+	}
+	return note(kind, key, "installed with %s; no generic remove command", label), true
+}
+
+// defaultsTag reads the domain and type the collector recorded for a setting.
+func defaultsTag(tag string) (domain, typ string) {
+	for _, l := range strings.Split(tag, "\n") {
+		if v, ok := strings.CutPrefix(l, "defaults "); ok {
+			domain = v
+		}
+		if v, ok := strings.CutPrefix(l, "type "); ok {
+			typ = v
+		}
+	}
+	return domain, typ
 }
 
 func installLibrary(key, tag string) (Action, bool) {
@@ -251,15 +570,7 @@ func installToolchain(key string) (Action, bool) {
 // type were recorded by the collector.
 func writeDefault(key, value, tag string) Action {
 	const kind = "defaults"
-	var domain, typ string
-	for _, l := range strings.Split(tag, "\n") {
-		if v, ok := strings.CutPrefix(l, "defaults "); ok {
-			domain = v
-		}
-		if v, ok := strings.CutPrefix(l, "type "); ok {
-			typ = v
-		}
-	}
+	domain, typ := defaultsTag(tag)
 	_, k, ok := strings.Cut(key, " › ")
 	if !ok || domain == "" || typ == "" {
 		return skipped(kind, key, "not a simple value")
@@ -416,7 +727,7 @@ func remove(kind, key string) string {
 func Installer(label string, actions []Action, wait bool) string {
 	var b strings.Builder
 	b.WriteString("#!/bin/sh\n")
-	fmt.Fprintf(&b, "# hostdiff: install on %s\n", comment(label))
+	fmt.Fprintf(&b, "# hostdiff: changes on %s\n", comment(label))
 	// Non-interactive ssh sessions start with a minimal PATH (/usr/bin
 	// first). HOSTDIFF_SYSROOT marks hostdiff's own test sandbox, which must
 	// only ever reach its stub tools.

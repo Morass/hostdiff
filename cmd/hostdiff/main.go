@@ -52,6 +52,9 @@ func main() {
 
 func run(args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
+		if isTerminal(stdout) && isTerminal(os.Stdin) && os.Getenv("HOSTDIFF_NO_TUI") == "" {
+			return cmdStart(stdout)
+		}
 		overview(stdout)
 		return nil
 	}
@@ -252,23 +255,147 @@ func save(label string, s *snapshot.Snapshot) (string, error) {
 type collectOpts struct {
 	only, skip []string
 	progress   io.Writer
+	// onProgress receives structured progress (the interactive view, and a
+	// remote `snap --json` reporting back).
+	onProgress func(snapshot.Progress)
 }
 
 func (t *target) collect(cfg *config.Config, opt collectOpts) (*snapshot.Snapshot, error) {
 	if t.file != "" {
-		return snapshot.Load(t.file)
+		s, err := snapshot.Load(t.file)
+		if err == nil && opt.onProgress != nil {
+			for _, sec := range s.Sections {
+				opt.onProgress(snapshot.Progress{Stage: "done", Kind: sec.Kind, Items: len(sec.Items), Status: sec.Status})
+			}
+		}
+		return s, err
 	}
 	skip := append(append([]string{}, cfg.Skip...), opt.skip...)
 	if t.machine == nil {
 		if opt.progress != nil {
 			fmt.Fprintf(opt.progress, "collecting %s…\n", t.label)
 		}
-		return collect.Snapshot(collect.Current(), collect.Options{Only: opt.only, Skip: skip, Tool: "hostdiff " + Version}), nil
+		return collect.Snapshot(collect.Current(), collect.Options{Only: opt.only, Skip: skip, Tool: "hostdiff " + Version, Progress: opt.onProgress}), nil
 	}
 	if opt.progress != nil {
 		fmt.Fprintf(opt.progress, "collecting %s over ssh…\n", t.label)
 	}
-	return remote.Snapshot(t.machine, remote.Options{Only: opt.only, Skip: skip})
+	return remote.Snapshot(t.machine, remote.Options{Only: opt.only, Skip: skip, Progress: opt.onProgress})
+}
+
+// cmdStart is `hostdiff` alone in a terminal: choose the other machine and
+// what to compare, then the interactive view.
+func cmdStart(stdout io.Writer) error {
+	cfg, err := config.Load(config.Path())
+	if err != nil {
+		return err
+	}
+	s := newSession(cfg, nil)
+	if len(s.Others()) == 0 {
+		overview(stdout)
+		fmt.Fprintf(stdout, "\nNo other machines are configured yet. Create the config with\n  hostdiff config init\nthen add a machine to %s and run hostdiff again.\n", cfg.Path)
+		return nil
+	}
+	return tui.Run(s, tui.Start{})
+}
+
+// session is the interactive mode's view of the machines: it resolves the
+// two sides, collects sections as they are asked for and compares.
+type session struct {
+	cfg     *config.Config
+	skip    []string
+	mu      sync.Mutex
+	targets [2]*target
+	snaps   [2]*snapshot.Snapshot
+}
+
+func newSession(cfg *config.Config, skip []string) *session {
+	return &session{cfg: cfg, skip: skip}
+}
+
+func (s *session) Here() tui.Machine {
+	name := "localhost"
+	if t, err := resolve(s.cfg, "localhost"); err == nil {
+		name = t.label
+	}
+	return tui.Machine{Name: name, Where: "this machine"}
+}
+
+func (s *session) Others() []tui.Machine {
+	var out []tui.Machine
+	for _, n := range s.cfg.Names() {
+		if m := s.cfg.Machines[n]; !m.Local {
+			out = append(out, tui.Machine{Name: n, Where: "ssh " + m.SSH})
+		}
+	}
+	return out
+}
+
+func (s *session) Groups() []tui.Group {
+	var out []tui.Group
+	for _, c := range collect.All() {
+		out = append(out, tui.Group{Kind: c.Kind, Title: c.Title, Reads: c.Reads, OS: c.OS})
+	}
+	return out
+}
+
+func (s *session) Select(a, b string) error {
+	ta, err := resolve(s.cfg, a)
+	if err != nil {
+		return err
+	}
+	tb, err := resolve(s.cfg, b)
+	if err != nil {
+		return err
+	}
+	if why, same := sameDevice(ta, tb); same {
+		return fmt.Errorf("%s and %s are the same machine (%s)", a, b, why)
+	}
+	if ta.label == tb.label {
+		tb.label += " (2)"
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.targets[0] == nil || s.targets[0].label != ta.label || s.targets[1].label != tb.label {
+		s.snaps = [2]*snapshot.Snapshot{{Format: snapshot.Format}, {Format: snapshot.Format}}
+	}
+	s.targets = [2]*target{ta, tb}
+	return nil
+}
+
+func (s *session) Labels() [2]string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return [2]string{s.targets[0].label, s.targets[1].label}
+}
+
+func (s *session) Collect(side int, kinds []string, progress func(snapshot.Progress)) error {
+	s.mu.Lock()
+	t := s.targets[side]
+	s.mu.Unlock()
+	fresh, err := t.collect(s.cfg, collectOpts{only: kinds, skip: s.skip, onProgress: progress})
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	merged := *fresh
+	merged.Sections = replaceSections(s.snaps[side].Sections, fresh.Sections)
+	s.snaps[side] = &merged
+	return nil
+}
+
+func (s *session) Result(kinds []string) *diff.Result {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return diff.Compare(diff.Side{Label: s.targets[0].label, Snap: s.snaps[0]}, diff.Side{Label: s.targets[1].label, Snap: s.snaps[1]}, diff.Options{Only: kinds, Ignore: s.cfg.Ignore})
+}
+
+func (s *session) Side(side int) tui.Side {
+	s.mu.Lock()
+	t := s.targets[side]
+	s.mu.Unlock()
+	return t.installSide(true)
 }
 
 // replaceSections returns old with every section of the same kind replaced
@@ -509,6 +636,16 @@ func cmdDiff(args []string, stdout, stderr io.Writer) error {
 	if targets[0].label == targets[1].label {
 		targets[1].label += " (2)"
 	}
+	interactive := true
+	fs.Visit(func(f *flag.Flag) {
+		switch f.Name {
+		case "format", "all", "details", "script", "install", "save":
+			interactive = false
+		}
+	})
+	if interactive && isTerminal(stdout) && isTerminal(os.Stdin) && os.Getenv("HOSTDIFF_NO_TUI") == "" {
+		return tui.Run(newSession(cfg, skipK), tui.Start{A: pos[0], B: pos[1], Kinds: onlyK})
+	}
 	var progress io.Writer
 	if isTerminal(stderr) {
 		progress = stderr
@@ -566,18 +703,9 @@ func cmdDiff(args []string, stdout, stderr io.Writer) error {
 		}
 		return installCLI(res, targets, side, *yes, refresh, stdout, stderr, !*noColor && isTerminal(stdout) && os.Getenv("NO_COLOR") == "")
 	}
-	formatSet := false
-	fs.Visit(func(f *flag.Flag) {
-		formatSet = formatSet || f.Name == "format" || f.Name == "all" || f.Name == "details"
-	})
 	switch {
 	case *script:
 		fmt.Fprint(stdout, fix.Script(res))
-	case !formatSet && isTerminal(stdout) && isTerminal(os.Stdin) && os.Getenv("HOSTDIFF_NO_TUI") == "":
-		return tui.Run(res, tui.Options{
-			Sides:   [2]tui.Side{targets[0].installSide(true), targets[1].installSide(true)},
-			Refresh: refresh,
-		})
 	case *format == "json":
 		if err := render.JSON(stdout, res); err != nil {
 			return err
@@ -648,8 +776,18 @@ func cmdSnap(args []string, stdout, stderr io.Writer) error {
 	if isTerminal(stderr) && !*asJSON {
 		progress = stderr
 	}
+	var onProgress func(snapshot.Progress)
+	if *asJSON && os.Getenv("HOSTDIFF_PROGRESS") != "" && t.machine == nil {
+		// Read by the machine that asked for this snapshot over ssh.
+		var mu sync.Mutex
+		onProgress = func(p snapshot.Progress) {
+			mu.Lock()
+			defer mu.Unlock()
+			fmt.Fprintf(stderr, "%s %s %s %d %s\n", remote.ProgressMarker, p.Stage, p.Kind, p.Items, orNone(string(p.Status)))
+		}
+	}
 	start := time.Now()
-	s, err := t.collect(cfg, collectOpts{only: onlyK, skip: skipK, progress: progress})
+	s, err := t.collect(cfg, collectOpts{only: onlyK, skip: skipK, progress: progress, onProgress: onProgress})
 	if err != nil {
 		return err
 	}
@@ -673,6 +811,13 @@ func cmdSnap(args []string, stdout, stderr io.Writer) error {
 		fmt.Fprintf(stdout, "\nSave it with -o FILE, or compare: hostdiff diff NAME\n")
 	}
 	return nil
+}
+
+func orNone(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return s
 }
 
 func cmdMachines(args []string, stdout io.Writer) error {

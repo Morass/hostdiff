@@ -1,7 +1,8 @@
 #!/bin/sh
-# Drives the real interactive view in tmux against a throwaway world (stub
-# brew, fake ssh): marks one item for each machine, installs, and checks
-# the screen. Nothing on this machine is read or installed.
+# Drives the real interactive mode in tmux against a throwaway world (stub
+# brew, fake ssh): picks the machine and the group, installs on both
+# machines, removes on the other, clones, and checks the screen after each
+# step. Nothing on this machine is read or changed.
 #
 #   scripts/tui-smoke.sh path/to/hostdiff
 set -eu
@@ -21,6 +22,8 @@ case "$1 $2" in
 "list --cask") ;;
 "leaves --installed-on-request") cut -d' ' -f1 "$HOME/.fixture/formulae";;
 "install "*) echo "$2 9.9.9" >> "$HOME/.fixture/formulae"; echo "installed $2";;
+"uninstall "*) grep -v "^$2 " "$HOME/.fixture/formulae" > "$HOME/.fixture/f.tmp"; mv "$HOME/.fixture/f.tmp" "$HOME/.fixture/formulae"; echo "uninstalled $2";;
+"upgrade "*) echo "upgraded $2";;
 esac
 EOF
 	chmod 755 "$1/.stubs/brew"
@@ -46,15 +49,15 @@ chmod 755 "$w/bin/ssh"
 printf '[machines.laptop]\nssh = "laptop"\n' > "$w/config.toml"
 chmod 600 "$w/config.toml"
 
-tmux -S "$sock" new-session -d -x 120 -y 30 \
-	"env -i HOME=$w/home PATH=$w/home/.stubs:/usr/bin:/bin TERM=xterm-256color HOSTDIFF_SSH=$w/bin/ssh HOSTDIFF_SYSROOT=$w/sys FAKE_SSH_ROOT=$w/remotes FAKE_SYSROOT=$w/sys HOSTDIFF_CONFIG=$w/config.toml $bin diff laptop --only brew; sleep 30"
+tmux -S "$sock" new-session -d -x 130 -y 32 \
+	"env -i HOME=$w/home PATH=$w/home/.stubs:/usr/bin:/bin TERM=xterm-256color HOSTDIFF_SSH=$w/bin/ssh HOSTDIFF_SYSROOT=$w/sys FAKE_SSH_ROOT=$w/remotes FAKE_SYSROOT=$w/sys HOSTDIFF_CONFIG=$w/config.toml $bin; sleep 30"
 
 screen() { tmux -S "$sock" capture-pane -p; }
 wait_for() {
 	i=0
 	until screen | grep -q -- "$1"; do
 		i=$((i + 1))
-		if [ $i -gt 100 ]; then
+		if [ $i -gt 150 ]; then
 			echo "FAIL: waiting for: $1" >&2
 			screen >&2
 			exit 1
@@ -62,30 +65,54 @@ wait_for() {
 		sleep 0.1
 	done
 }
-keys() { for k in "$@"; do tmux -S "$sock" send-keys "$k"; sleep 0.15; done; }
+keys() { for k in "$@"; do tmux -S "$sock" send-keys "$k"; sleep 0.2; done; }
+finish() { # wait for the installer, return to the view
+	wait_for "Press Enter to return"
+	keys Enter
+}
 
+# Machine, then group.
+wait_for "Compare with:"
+keys Enter
+wait_for "What should be compared?"
+keys j Space Enter
 wait_for "formula › ripgrep"
-keys Tab Space
-wait_for "marked formula › wget to install on laptop"
-keys j Space
-wait_for "marked formula › ripgrep to install on localhost"
-keys i
-wait_for "brew install ripgrep"
+
+# ◀ wget is only here: install it on laptop (first choice).
+keys Tab Enter
+wait_for "Install on laptop"
+keys Enter
+wait_for "brew install wget"
 keys y
-wait_for "Press Enter to return"
-wait_for "installed ripgrep"
+finish
+wait_for "laptop: 1 of 1 installed"
+
+# ▶ ripgrep is only on laptop: install it here.
 keys Enter
-wait_for "Press Enter to return"
-wait_for "installed wget"
+wait_for "Install on localhost"
+keys Enter y
+finish
+wait_for "localhost: 1 of 1 installed"
+
+# Both now differ in version. Remove ripgrep from laptop (fourth choice).
 keys Enter
-wait_for "laptop: 1 of 1 installed items now match"
-# Both are installed now; the stub installs another version, so they may
-# show as ≠ but never as only on one side.
-if screen | grep -E -q "│ [◀▶] "; then
-	echo "FAIL: an item is still missing after installing" >&2
-	screen >&2
-	exit 1
-fi
+wait_for "Remove from laptop"
+keys j j j Enter
+wait_for "brew uninstall ripgrep"
+keys y
+finish
+wait_for "laptop: 1 of 1 removed"
+
+# Clone: make localhost like laptop, which removes ripgrep here.
+keys C
+wait_for "Make localhost like laptop"
+keys Enter
+wait_for "type yes"
+keys y e s Enter
+finish
+wait_for "changes took effect"
+
 grep -q "wget 9.9.9" "$w/remotes/laptop/.fixture/formulae"
-grep -q "ripgrep 9.9.9" "$w/home/.fixture/formulae"
-echo "ok: marked, installed on both machines, collected again"
+! grep -q "ripgrep" "$w/remotes/laptop/.fixture/formulae"
+! grep -q "ripgrep" "$w/home/.fixture/formulae"
+echo "ok: picked machine and group, installed on both, removed, cloned"

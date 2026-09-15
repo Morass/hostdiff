@@ -26,17 +26,13 @@ A is this machine. A and B can be:
   FILE.json     a snapshot saved with "hostdiff snap -o FILE.json"
   NAME@last     the newest snapshot saved with --save for NAME (also @prev)
 
-In a terminal, diff opens an interactive view: sections on the left, what
-differs on the right, Enter for the content diff of an item, s for the
-install script. Space marks an item to install on the machine that lacks it
-(○ shows what hostdiff can install; on a section it marks the whole
-section), i lists the commands and y runs them, on this machine or over
-ssh, in the terminal so password prompts work. The sections are then
-collected again. Nothing is ever removed or downgraded. Piped, or with --format, --all or --details, it prints text.
-
-Comparing a machine with itself is refused before anything is collected:
-this machine twice, or an ssh destination that ssh -G resolves back here
-for the same account.
+In a terminal, diff opens the interactive table: one row per item, one
+column per machine. space selects items, enter lists what can be done with
+them on either machine (install, update to the other version, remove, set
+or reset a setting), and every action shows its commands for confirmation
+before they run in the terminal. C makes one machine like the other. Run
+hostdiff without a command to choose the machine and the groups first.
+Piped, or with --format, --all or --details, it prints text.
 
 The exit status of printed output is 0 when nothing differs, 1 when
 something does, 2 on error.`,
@@ -151,7 +147,8 @@ Commands:
 	fmt.Fprint(w, `
 Start:
   hostdiff config init          # then add your machines
-  hostdiff diff NAME            # NAME vs this machine
+  hostdiff                      # choose a machine and what to compare
+  hostdiff diff NAME            # this machine vs NAME
 
 More: hostdiff help COMMAND, or hostdiff COMMAND --help
 `)

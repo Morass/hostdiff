@@ -10,7 +10,7 @@ shows only what differs.
 
 - **Compare** this machine with another one over your existing ssh setup, or two saved snapshots.
 - **Browse** the differences section by section, with a content diff for any changed file.
-- **Install what is missing** on either machine: mark items in the view, check the commands, and hostdiff runs them there (over ssh for the other machine) and collects again.
+- **Act on it** on either machine: install, update, remove or clone, after confirming the exact commands (over ssh for the other machine).
 
 It is a single Go binary for macOS and Linux. The other machine does not need
 hostdiff installed: when it is missing and the systems match, the binary is
@@ -41,7 +41,8 @@ Or from a checkout: `go build -o ~/.local/bin/hostdiff ./cmd/hostdiff`.
 ```sh
 hostdiff config init                 # creates ~/.config/hostdiff/config.toml
 $EDITOR "$(hostdiff config path)"     # add a machine: ssh = "laptop"
-hostdiff diff laptop                 # this machine vs laptop
+hostdiff                             # pick the machine and what to compare
+hostdiff diff laptop                 # this machine vs laptop, everything
 ```
 
 No config at all is needed for files:
@@ -52,32 +53,41 @@ hostdiff snap -o laptop.json         # on the other
 hostdiff diff laptop.json desk.json
 ```
 
-In a terminal, `diff` opens an interactive view: sections on the left, what
-differs on the right (◀ only on the first machine, ▶ only on the second,
-≠ different on both). Enter shows the content diff of an item, `/` filters,
-`a` also lists what is the same, `d` shows package dependencies, `s` shows
-the install script. Piped or with `--format text|markdown|json` it prints
-instead.
+In a terminal, `hostdiff` on its own asks which machine to compare with and
+which groups (Homebrew, language libraries, settings, …), then scans both
+machines with live progress and shows a table: one row per item, one column
+per machine, ◀ only on the first, ▶ only on the second, ≠ different. Groups
+split into their parts on the left (formulae and casks, each Python version
+and gems). `hostdiff diff laptop` goes straight to the table; `--only`
+chooses the groups. Piped or with `--format text|markdown|json` it prints.
 
-**Installing from the view.** `○` marks items hostdiff knows how to install
-on the machine that lacks them. `space` marks one (`●`, in that machine's
-colour; on a changed setting it cycles through both machines), `space` on a
-section marks all of it, `x` clears the marks. `i` shows the exact commands
-per machine and `y` runs them in your terminal: on this machine directly, on
-the other one over ssh with a terminal, so `sudo` and installer prompts work.
-Steps run one by one, a failure does not stop the rest, Ctrl-C stops after
-the current step. The affected sections are then collected again and the
-view shows what now matches. The same without the view:
-`hostdiff diff laptop --install localhost` (add `--yes` to skip the question).
+**Acting on the results.** Select items with `space` (on the left: the whole
+group), then `enter` lists what hostdiff can do with them on either machine:
+install, update to the other machine's version, remove, or set and reset a
+setting. Every choice opens a confirmation with the exact commands; `y` runs
+them in your terminal, on this machine directly and on the other over ssh
+with a terminal, so `sudo` and installer prompts work. Steps run one by one,
+a failure does not stop the rest, Ctrl-C stops after the current step, and
+the affected groups are scanned again. `C` (clone) makes one machine like
+the other in the compared groups: installs, updates and removals together,
+and it asks you to type `yes` when anything would be removed. Other keys:
+`v` details and content diffs, `/` filter, `a` also same items, `d`
+dependencies, `s` the install script, `c` other groups, `m` other machine,
+`r` rescan.
 
-What can be installed: Homebrew formulae (requested ones), casks and taps,
-App Store apps (`mas`), npm, pnpm, pipx, uv, cargo, gh and dotnet global
-tools, VS Code, Cursor and VSCodium extensions, pip `--user` packages per
-Python version, gems, CPAN modules, Composer, R, Julia, LuaRocks and Dart
-packages, pyenv, rbenv, rustup, asdf, mise and uv Python versions, and
-scalar macOS settings (`defaults write`). hostdiff never removes, upgrades
-or downgrades anything, and does not copy dotfiles (snapshots hold them
-with secrets redacted).
+Installing without the table: `hostdiff diff laptop --install localhost`
+lists the commands that bring laptop's items here and asks (`--yes` skips
+the question).
+
+What hostdiff can install, update and remove: Homebrew formulae, casks and
+taps (updates go to the newest version), App Store apps (`mas`), npm, pnpm,
+pipx, uv, cargo, gh and dotnet global tools, VS Code, Cursor and VSCodium
+extensions, pip `--user` packages per Python version, gems, CPAN modules,
+Composer, LuaRocks and Dart packages (R and Julia: install and remove),
+pyenv, rbenv, rustup, asdf, mise and uv Python versions, and scalar macOS
+settings (`defaults write` and `defaults delete`). Packages installed
+system-wide for an interpreter, apps without a cask and dotfiles are listed
+but not changed (snapshots hold dotfiles with secrets redacted).
 
 ```text
 ◀ desk (desk, macOS/arm64, 2026-09-15 17:30)
@@ -212,8 +222,9 @@ it can guard scripts: `hostdiff diff golden.json --only brew --format text`.
 
 ## Safety and privacy
 
-hostdiff only reads, unless you install from the view or with `--install`.
-Then it runs exactly the commands it showed you, after you confirmed them.
+hostdiff only reads, unless you choose an action in the table or use
+`--install`. Then it runs exactly the commands it showed you, after you
+confirmed them (for a clone that removes anything, by typing `yes`).
 
 - **Secrets are removed where they are read.** Every value passes one
   redaction step on the machine being collected, before it is written to a
@@ -258,7 +269,8 @@ Then it runs exactly the commands it showed you, after you confirmed them.
 ## Development
 
 ```sh
-go test ./...                       # unit, interactive view and end-to-end tests
+go test ./...                       # unit, interactive mode and end-to-end tests
+scripts/tui-smoke.sh ./hostdiff     # drives the real interactive mode in tmux
 HOSTDIFF_DEBUG=1 hostdiff snap      # time per section
 ```
 

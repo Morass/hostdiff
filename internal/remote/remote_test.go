@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/morass/hostdiff/internal/config"
+	"github.com/morass/hostdiff/internal/snapshot"
 )
 
 func fakeSSH(t *testing.T, output string) Options {
@@ -96,5 +97,21 @@ func TestUploadScriptCleansUpWhenInterrupted(t *testing.T) {
 	}
 	if left, _ := filepath.Glob(filepath.Join(tmp, "hostdiff.*")); len(left) != 0 {
 		t.Fatalf("left behind: %v", left)
+	}
+}
+
+// Progress lines from the remote hostdiff are passed on, even when split
+// across writes; everything else stays as the error text.
+func TestProgressWriter(t *testing.T) {
+	var got []snapshot.Progress
+	w := &progressWriter{fn: func(p snapshot.Progress) { got = append(got, p) }}
+	w.Write([]byte("hello\n" + ProgressMarker + " start brew 0 -\n" + ProgressMarker[:5]))
+	w.Write([]byte(ProgressMarker[5:] + " done brew 12 ok\n" + ProgressMarker + " done bad;kind 1 ok\ntail"))
+	rest := string(w.bytes())
+	if rest != "hello\n"+ProgressMarker+" done bad;kind 1 ok\ntail" {
+		t.Errorf("kept %q", rest)
+	}
+	if len(got) != 2 || got[1].Kind != "brew" || got[1].Items != 12 || got[1].Status != snapshot.OK {
+		t.Errorf("progress %+v", got)
 	}
 }
