@@ -585,7 +585,11 @@ func (a *App) keyGroups(k string) tea.Cmd {
 				a.kinds = append(a.kinds, g.Kind)
 			}
 		}
-		// Nothing selected means everything: the quickest way to compare all.
+		if len(a.kinds) == 0 {
+			// Scanning everything by accident is slow and surprising.
+			a.note = "Nothing is selected: space picks a group, a selects them all."
+			return nil
+		}
 		return a.startScan()
 	}
 	return nil
@@ -720,7 +724,7 @@ func (a *App) viewGroups() string {
 			n++
 		}
 	}
-	sum := styleDim.Render("nothing selected: enter compares every group (space picks some, a toggles all)")
+	sum := styleDim.Render("nothing selected yet: space picks a group, a selects them all")
 	if n > 0 {
 		sum = styleDim.Render(fmt.Sprintf("%d selected", n))
 	}
@@ -728,7 +732,7 @@ func (a *App) viewGroups() string {
 		sum = styleBad.Render(a.note)
 	}
 	lines = append(lines, "", sum)
-	footer := "↑↓ move · space select · a all · enter scan (nothing selected = everything) · esc back · q quit"
+	footer := "↑↓ move · space select · a all · enter scan the selected · esc back to the machines · q quit"
 	return a.screenLines(lines, footer)
 }
 
