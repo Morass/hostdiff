@@ -206,12 +206,7 @@ func TestGuidedFlowPicksMachineAndGroups(t *testing.T) {
 	must(t, a.View(), "◀ laptop", "Compare with:", "desk", "ssh box")
 	press(a, "enter")
 	reachable(a)
-	must(t, a.View(), "What should be compared?", "laptop and desk", "Homebrew", "nothing selected yet")
-	press(a, "enter")
-	must(t, a.View(), "Nothing is selected: space picks a group")
-	if a.screen != screenGroups {
-		t.Fatal("enter with nothing selected started a scan")
-	}
+	must(t, a.View(), "What should be compared?", "laptop and desk", "Homebrew", "nothing selected: enter compares every group")
 	press(a, "space", "enter")
 	if a.screen != screenScan || !strings.Contains(a.View(), "Scanning") {
 		t.Fatalf("not scanning:\n%s", a.View())
@@ -566,4 +561,18 @@ func TestSelectAll(t *testing.T) {
 	}
 	press(a, "ctrl+a")
 	must(t, a.View(), "unselected 6 items in every group")
+}
+
+// Enter with no group selected compares every group.
+func TestEnterWithNothingSelectedComparesEverything(t *testing.T) {
+	f := newFake()
+	a := newApp(f, Start{})
+	a.Update(tea.WindowSizeMsg{Width: 130, Height: 30})
+	press(a, "enter")
+	reachable(a)
+	press(a, "enter")
+	scanned(t, a)
+	if len(a.kinds) != len(f.Groups()) || a.screen != screenView {
+		t.Fatalf("kinds %v, screen %v", a.kinds, a.screen)
+	}
 }

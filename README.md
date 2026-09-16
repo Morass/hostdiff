@@ -60,8 +60,8 @@ That is the whole start. hostdiff asks four things in order:
    fingerprint and type the password. That one connection is then reused for
    the rest of the run, so nothing asks again.
 3. **What should be compared?** The groups: Homebrew, applications, keyboard
-   shortcuts, language libraries, settings… `space` picks, `a` picks all,
-   `enter` starts.
+   shortcuts, language libraries, settings… `space` picks some; `enter` with
+   nothing picked compares every group.
 4. Both machines are scanned side by side, with progress per group, and the
    table appears.
 
