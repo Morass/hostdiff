@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1031" height="592" viewBox="0 0 1031 592" font-family="'SF Mono', Menlo, Consolas, 'DejaVu Sans Mono', 'Liberation Mono', monospace" font-size="14">
+<rect width="1031" height="592" rx="10" fill="#10141b"/>
+<rect width="1031" height="34" rx="10" fill="#1a1f29"/><rect y="24" width="1031" height="10" fill="#1a1f29"/>
+<circle cx="20" cy="17" r="6" fill="#ff5f57"/><circle cx="40" cy="17" r="6" fill="#febc2e"/><circle cx="60" cy="17" r="6" fill="#28c840"/><text x="515" y="22" fill="#8b93a3" text-anchor="middle" font-size="13">hostdiff</text>
+<text x="18.00" y="56.32" fill="#f9e2af" textLength="8.43" lengthAdjust="spacingAndGlyphs" xml:space="preserve">◀</text><text x="26.43" y="56.32" fill="#f9e2af" xml:space="preserve"> air (air, macOS/arm64)</text><text x="245.61" y="56.32" fill="#89dceb" textLength="8.43" lengthAdjust="spacingAndGlyphs" xml:space="preserve">▶</text><text x="254.04" y="56.32" fill="#89dceb" xml:space="preserve"> mini (mini, macOS/arm64)</text>
+<text x="18.00" y="74.32" fill="#d5dae3" font-weight="700" text-decoration="underline" xml:space="preserve">Confirm:</text><text x="93.87" y="74.32" fill="#d5dae3" font-weight="700" text-decoration="underline" xml:space="preserve">enter</text><text x="144.45" y="74.32" fill="#d5dae3" font-weight="700" text-decoration="underline" xml:space="preserve">(or</text><text x="178.17" y="74.32" fill="#d5dae3" font-weight="700" text-decoration="underline" xml:space="preserve">y)</text><text x="203.46" y="74.32" fill="#d5dae3" font-weight="700" text-decoration="underline" xml:space="preserve">runs</text><text x="245.61" y="74.32" fill="#d5dae3" font-weight="700" text-decoration="underline" xml:space="preserve">these</text><text x="296.19" y="74.32" fill="#d5dae3" font-weight="700" text-decoration="underline" xml:space="preserve">commands,</text><text x="380.49" y="74.32" fill="#d5dae3" font-weight="700" text-decoration="underline" xml:space="preserve">esc</text><text x="414.21" y="74.32" fill="#d5dae3" font-weight="700" text-decoration="underline" xml:space="preserve">cancels</text>
+<text x="18.00" y="92.32" fill="#d5dae3" xml:space="preserve">hostdiff will run these 2 commands on mini (ssh mini), in this order, exactly as written:</text>
+
+<text x="18.00" y="128.32" fill="#a6e3a1" textLength="8.43" lengthAdjust="spacingAndGlyphs" xml:space="preserve">✚</text><text x="26.43" y="128.32" fill="#d5dae3" xml:space="preserve"> Install</text>
+<text x="18.00" y="146.32" fill="#d5dae3" xml:space="preserve">    1  brew install --cask rectangle</text>
+<text x="18.00" y="164.32" fill="#d5dae3" xml:space="preserve">    2  brew install jq</text>
+
+<text x="18.00" y="200.32" fill="#7f8796" xml:space="preserve"># How: the commands go into a temporary script, copied to mini over ssh, run there with /bin/sh in this terminal (ssh</text><text x="1004.31" y="200.32" fill="#7f8796" textLength="8.43" lengthAdjust="spacingAndGlyphs" xml:space="preserve">…</text>
+<text x="18.00" y="218.32" fill="#7f8796" xml:space="preserve"># Before each command the script prints it with its number; you can answer password prompts.</text>
+<text x="18.00" y="236.32" fill="#7f8796" xml:space="preserve"># A failed command does not stop the rest; Ctrl-C stops after the current one. Nothing else is run.</text>
+<text x="18.00" y="254.32" fill="#7f8796" xml:space="preserve"># Afterwards the affected groups are scanned again (read only). Tab shows the full script.</text>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<text x="18.00" y="560.32" fill="#d5dae3" font-weight="700" xml:space="preserve">enter or y: run </text><text x="152.88" y="560.32" fill="#d5dae3" font-weight="700" textLength="8.43" lengthAdjust="spacingAndGlyphs" xml:space="preserve">·</text><text x="161.31" y="560.32" fill="#d5dae3" font-weight="700" xml:space="preserve"> tab full script </text><text x="304.62" y="560.32" fill="#d5dae3" font-weight="700" textLength="8.43" lengthAdjust="spacingAndGlyphs" xml:space="preserve">·</text><text x="313.05" y="560.32" fill="#d5dae3" font-weight="700" xml:space="preserve"> esc cancel </text><text x="414.21" y="560.32" fill="#d5dae3" font-weight="700" textLength="8.43" lengthAdjust="spacingAndGlyphs" xml:space="preserve">·</text><text x="431.07" y="560.32" fill="#d5dae3" font-weight="700" textLength="8.43" lengthAdjust="spacingAndGlyphs" xml:space="preserve">↑</text><text x="439.50" y="560.32" fill="#d5dae3" font-weight="700" textLength="8.43" lengthAdjust="spacingAndGlyphs" xml:space="preserve">↓</text><text x="447.93" y="560.32" fill="#d5dae3" font-weight="700" xml:space="preserve"> scroll</text>
+</svg>

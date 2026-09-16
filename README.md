@@ -15,6 +15,8 @@ app, a keyboard shortcut, a Dock setting, a line in `.zshrc`, a different
 - **Act**: install, update, remove, or make one machine like the other — after
   confirming the exact commands, which then run in your terminal.
 
+<p align="center"><img src="docs/images/table.svg" alt="hostdiff: Homebrew on two machines side by side, one column per machine" width="860"></p>
+
 It is a single Go binary for macOS and Linux. The other machine needs no
 account, agent or service: hostdiff runs your own `ssh`, and if hostdiff is
 not installed there it sends itself over for one run and deletes itself again.
@@ -65,6 +67,8 @@ That is the whole start. hostdiff asks four things in order:
 4. Both machines are scanned side by side, with progress per group, and the
    table appears.
 
+<p align="center"><img src="docs/images/machines.svg" alt="choosing the other machine" width="420"> <img src="docs/images/groups.svg" alt="choosing what to compare" width="420"></p>
+
 To skip the questions: `hostdiff diff laptop` compares this machine with
 `laptop` and scans everything; `--only brew,libraries` limits the groups.
 
@@ -78,15 +82,7 @@ hostdiff diff laptop.json desk.json
 
 ## The table
 
-```text
-◀ air (Mac, macOS/arm64)   ▶ mini (Mac-mini, macOS/arm64)
-14 differences · 2 selected · enter: what to do with them
-Homebrew            12 │                     air          mini
-  formula            9 │ ◀ ● jq              1.7.1        —
-  cask               3 │ ▶ ● rectangle       —            0.87
-Language libraries 138 │ ≠   node            26.0.0       25.1.0
-Dotfiles             2 │ =   git             2.50.1       2.50.1
-```
+<p align="center"><img src="docs/images/table.svg" alt="the table" width="860"></p>
 
 - **Left:** the groups, with the number of differences. The selected group
   splits into its parts (formulae, casks, taps; each Python version, gems).
@@ -114,43 +110,23 @@ Dotfiles             2 │ =   git             2.50.1       2.50.1
 Select items with `space` (or just stand on one) and press `enter`. hostdiff
 lists what it can do with them, on either machine:
 
-```text
-cask › bambu-studio
-
-  ↑ Update on air to mini's version
-  ↑ Update on mini to air's version
-  ✗ Remove from air
-› ✗ Remove from mini
-```
+<p align="center"><img src="docs/images/menu.svg" alt="the actions for two selected items" width="860"></p>
 
 ✚ install, ↑ update, ✎ set a setting, ✗ remove, ↺ reset a setting to its
 default, ⇄ clone. Choosing one opens the confirmation:
 
-```text
-hostdiff will run these 2 commands on mini (ssh mini), in this order,
-exactly as written:
-
-✗ Remove
-    1  brew uninstall --cask bambu-studio
-    2  brew uninstall jq
-
-Remove: this deletes 2 items from mini.
-
-# How: the commands go into a temporary script, copied to mini over ssh, run
-# there with /bin/sh in this terminal (ssh -t), then deleted.
-# Before each command the script prints it with its number; you can answer
-# password prompts.
-# A failed command does not stop the rest; Ctrl-C stops after the current one.
-# Nothing else is run. Tab shows the full script.
-
-enter or y: run · tab full script · esc cancel
-```
+<p align="center"><img src="docs/images/confirm.svg" alt="the confirmation: numbered commands, where and how they run" width="860"></p>
 
 `enter` (or `y`) runs them. You see each command and its result as it goes,
-then press Enter to come back. hostdiff scans the affected groups again and
+then press Enter to come back:
+
+<p align="center"><img src="docs/images/run.svg" alt="the commands running, each with its result" width="860"></p>
+ hostdiff scans the affected groups again and
 says what happened, for example `mini: 1 of 2 removed, 1 failed`. Every item
 is marked in the table (`✓` `✗` `?`), and `o` shows each command with its exit
 status. That summary stays until the next run.
+
+<p align="center"><img src="docs/images/after.svg" alt="after the run: both items marked as done" width="860"></p>
 
 **Clone.** `C` offers "Make air like mini" (or the other way round) for the
 groups you compared: installs, updates and removals in one run, removals last.
@@ -393,6 +369,7 @@ them — and for a clone that removes anything, after you typed `yes`.
 ```sh
 go test ./...                       # unit, interactive mode and end-to-end tests
 scripts/tui-smoke.sh ./hostdiff     # drives the real interactive mode in tmux
+scripts/screenshots.sh              # regenerates docs/images/ from a pretend pair of machines
 HOSTDIFF_DEBUG=1 hostdiff snap      # time per group
 ```
 

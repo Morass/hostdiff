@@ -273,6 +273,10 @@ func Snapshot(e *Env, opt Options) *snapshot.Snapshot {
 	if i := strings.Index(host, "."); i > 0 {
 		host = host[:i]
 	}
+	// The test and screenshot sandboxes name their pretend machines.
+	if name := os.Getenv("HOSTDIFF_HOSTNAME"); name != "" && e.Root != "" {
+		host = name
+	}
 	snap := &snapshot.Snapshot{
 		Format:  snapshot.Format,
 		Tool:    opt.Tool,
