@@ -113,6 +113,7 @@ type view struct {
 	status        string
 	outcome       map[string]outcome
 	lastRun       []string
+	lastSummary   string
 	width, height int
 }
 
@@ -645,7 +646,7 @@ func (v *view) run() tea.Cmd {
 	prepare := v.b.Side(c.side).Prepare
 	script := fix.Installer(label, c.acts, true)
 	v.busy = true
-	v.outcome, v.lastRun = map[string]outcome{}, nil
+	v.outcome, v.lastRun, v.lastSummary = map[string]outcome{}, nil, ""
 	v.status = "starting on " + label + "…"
 	return func() tea.Msg {
 		run, err := prepare(script)
@@ -660,7 +661,8 @@ func (v *view) handle(msg tea.Msg) tea.Cmd {
 	case preparedMsg:
 		if msg.err != nil {
 			v.busy = false
-			v.status = fmt.Sprintf("could not start on %s: %v", l[msg.job.side], msg.err)
+			v.lastSummary = fmt.Sprintf("could not start on %s: %v", l[msg.job.side], msg.err)
+			v.status = v.lastSummary
 			return nil
 		}
 		v.status = "running on " + l[msg.job.side] + "…"
@@ -739,15 +741,19 @@ func (v *view) record(msg refreshedMsg) {
 	if msg.job.clone || done == "" {
 		done = "applied"
 	}
-	v.status = fmt.Sprintf("%s: %d of %d %s", side, ok, len(msg.job.acts), done)
+	v.lastSummary = fmt.Sprintf("%s: %d of %d %s", side, ok, len(msg.job.acts), done)
 	if failed > 0 {
-		v.status += fmt.Sprintf(", %d failed", failed)
+		v.lastSummary += fmt.Sprintf(", %d failed", failed)
 	}
 	if unknown > 0 {
-		v.status += fmt.Sprintf(", %d not run", unknown)
+		v.lastSummary += fmt.Sprintf(", %d not run", unknown)
 	}
+	v.lastSummary += " · o shows every command"
+	v.status = v.lastSummary
+	// Anything that did not go through is shown at once: a summary line is
+	// easy to miss, and a failed command must never look like a success.
 	if failed+unknown > 0 {
-		v.status += " · o shows what happened"
+		v.detail, v.detailFor, v.detailTop = v.lastRun, "The last run · esc back", 0
 	}
 }
 
@@ -1081,6 +1087,9 @@ func (v *view) render() string {
 	switch {
 	case v.status != "":
 		b.WriteString(styleBold.Render(truncate(v.status, w)) + "\n")
+	case v.lastSummary != "":
+		// The result of the last run stays until the next one.
+		b.WriteString(styleBold.Render(truncate("last run · "+v.lastSummary, w)) + "\n")
 	default:
 		b.WriteString(styleDim.Render(truncate(info, w)) + "\n")
 	}

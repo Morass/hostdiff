@@ -456,10 +456,7 @@ func (a *App) keyGroups(k string) tea.Cmd {
 	case "q":
 		return tea.Quit
 	case "esc", "left", "h":
-		if a.view != nil && k == "esc" {
-			a.screen = screenView
-			return nil
-		}
+		// One step back: the machine list comes before the groups.
 		a.screen = screenMachines
 	case "down", "j":
 		a.gcur = min(a.gcur+1, len(a.groups)-1)
@@ -574,7 +571,7 @@ func (a *App) viewMachines() string {
 	}
 	footer := "↑↓ choose · enter continue · q quit"
 	if a.view != nil {
-		footer = "↑↓ choose · enter continue · esc back to the table · q quit"
+		footer = "↑↓ choose · enter continue · esc back to the comparison · q quit"
 	}
 	if a.entering {
 		footer = "type a destination · enter continue · esc cancel"
@@ -621,10 +618,7 @@ func (a *App) viewGroups() string {
 		sum = fmt.Sprintf("%d selected", n)
 	}
 	lines = append(lines, "", styleDim.Render(sum))
-	footer := "↑↓ move · space select · a all · enter scan · h machines · q quit"
-	if a.view != nil {
-		footer += " · esc back to the table"
-	}
+	footer := "↑↓ move · space select · a all · enter scan · esc back to the machines · q quit"
 	return a.screenLines(lines, footer)
 }
 

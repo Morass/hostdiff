@@ -377,12 +377,17 @@ func TestFailedCommandIsReported(t *testing.T) {
 	press(a, "tab", "j", "enter", "j", "enter") // jq: remove from laptop
 	run(t, a, press(a, "y"))
 	v := a.View()
-	must(t, v, "laptop: 0 of 1 removed, 1 failed", "o shows what happened", "✗")
+	must(t, v, "What the last run did on laptop", "✗   1  brew uninstall jq  (exit 1)")
+	press(a, "esc")
+	v = a.View()
+	must(t, v, "laptop: 0 of 1 removed, 1 failed", "✗")
+	press(a, "j", "k") // the summary survives moving around
+	must(t, a.View(), "last run · laptop: 0 of 1 removed, 1 failed")
 	if !strings.Contains(v, "formula › jq") {
 		t.Errorf("an item that was not removed must stay in the table:\n%s", v)
 	}
 	press(a, "o")
-	must(t, a.View(), "What the last run did on laptop", "✗   1  brew uninstall jq  (exit 1)", "its output is in the terminal above")
+	must(t, a.View(), "What the last run did on laptop", "its output is in the terminal above")
 }
 
 // Commands that never ran (Ctrl-C) are not counted as done.
@@ -392,9 +397,9 @@ func TestStoppedRunSaysNotRun(t *testing.T) {
 	a := started(t, f, Start{B: "desk", Kinds: []string{"brew"}})
 	press(a, "tab", "j", "enter", "enter") // jq: install on desk
 	run(t, a, press(a, "y"))
+	must(t, a.View(), "What the last run did on desk", "never ran")
+	press(a, "esc")
 	must(t, a.View(), "desk: 0 of 1 installed, 1 not run")
-	press(a, "o")
-	must(t, a.View(), "never ran")
 }
 
 // Escape steps back: table → groups → machines, and back to the table.
@@ -408,13 +413,13 @@ func TestEscapeGoesBack(t *testing.T) {
 	if a.screen != screenGroups {
 		t.Fatalf("esc did not go back to the groups: %v", a.screen)
 	}
-	press(a, "h")
+	press(a, "esc")
 	if a.screen != screenMachines {
-		t.Fatalf("h did not go back to the machines: %v", a.screen)
+		t.Fatalf("esc did not go back to the machines: %v", a.screen)
 	}
 	press(a, "esc")
 	if a.screen != screenView {
-		t.Fatalf("esc did not return to the table: %v", a.screen)
+		t.Fatalf("esc did not return to the comparison: %v", a.screen)
 	}
 }
 
