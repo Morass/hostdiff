@@ -107,7 +107,7 @@ Dotfiles             2 │ =   git             2.50.1       2.50.1
 | `/` | filter, `a` also show items that are the same, `d` show package dependencies |
 | `s` | the whole install script, `o` what the last run did |
 | `c` | other groups, `m` other machine, `r` scan again |
-| `esc` | one step back; `q` quit |
+| `esc` | one step back (table → groups → machines → quit); `q` quit |
 
 ## Changing things
 

@@ -431,8 +431,20 @@ func (a *App) key(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case screenGroups:
 		return a, a.keyGroups(k)
 	case screenScan, screenCheck:
-		if k == "q" {
+		switch k {
+		case "q":
 			return a, tea.Quit
+		case "esc":
+			// Leave the scan or check; what it still finishes is ignored.
+			a.gen++
+			if !a.pick {
+				return a, tea.Quit
+			}
+			if a.screen == screenScan {
+				a.screen = screenGroups
+			} else {
+				a.screen = screenMachines
+			}
 		}
 	case screenConnect:
 		switch k {
@@ -510,12 +522,10 @@ func (a *App) keyMachines(k string) tea.Cmd {
 		return nil
 	}
 	switch k {
-	case "q":
+	case "q", "esc":
+		// The machine list is the first screen: escape leaves from here, so
+		// pressing it repeatedly always ends hostdiff.
 		return tea.Quit
-	case "esc":
-		if a.view != nil {
-			a.screen = screenView
-		}
 	case "down", "j":
 		a.mcur = min(a.mcur+1, len(a.others))
 	case "up", "k":
@@ -680,10 +690,7 @@ func (a *App) viewMachines() string {
 	if a.note != "" {
 		lines = append(lines, "", styleBad.Render(a.note))
 	}
-	footer := "↑↓ choose · enter continue · q quit"
-	if a.view != nil {
-		footer = "↑↓ choose · enter continue · esc back to the comparison · q quit"
-	}
+	footer := "↑↓ choose · enter continue · esc or q quit"
 	if a.entering {
 		footer = "type a destination · enter continue · esc cancel"
 	}

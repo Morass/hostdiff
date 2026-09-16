@@ -439,7 +439,7 @@ func TestStoppedRunSaysNotRun(t *testing.T) {
 	must(t, a.View(), "desk: 0 of 1 installed, 1 not run")
 }
 
-// Escape steps back: table → groups → machines, and back to the table.
+// Escape steps back: table → groups → machines → quit, so holding it leaves.
 func TestEscapeGoesBack(t *testing.T) {
 	a := started(t, newFake(), Start{B: "desk", Kinds: []string{"brew"}})
 	press(a, "tab", "esc") // the right pane hands focus back to the groups list
@@ -454,9 +454,10 @@ func TestEscapeGoesBack(t *testing.T) {
 	if a.screen != screenMachines {
 		t.Fatalf("esc did not go back to the machines: %v", a.screen)
 	}
-	press(a, "esc")
-	if a.screen != screenView {
-		t.Fatalf("esc did not return to the comparison: %v", a.screen)
+	if cmd := press(a, "esc"); cmd == nil {
+		t.Fatalf("esc on the machine list did not quit")
+	} else if _, ok := cmd().(tea.QuitMsg); !ok {
+		t.Fatalf("esc on the machine list did not quit")
 	}
 }
 
@@ -566,4 +567,18 @@ func TestSelectAll(t *testing.T) {
 	}
 	press(a, "ctrl+a")
 	must(t, a.View(), "unselected 6 items in every group")
+}
+
+// Escape during a scan goes back, and out when nothing was picked here.
+func TestEscapeDuringScan(t *testing.T) {
+	a := newApp(newFake(), Start{B: "desk", Kinds: []string{"brew"}})
+	a.Update(tea.WindowSizeMsg{Width: 130, Height: 30})
+	a.Init()
+	cmd := press(a, "esc")
+	if cmd == nil {
+		t.Fatal("esc while checking the connection did nothing")
+	}
+	if _, ok := cmd().(tea.QuitMsg); !ok {
+		t.Fatal("esc while checking did not quit")
+	}
 }
