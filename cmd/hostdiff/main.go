@@ -39,6 +39,8 @@ var errDifferent = errors.New("differences found")
 
 func main() {
 	err := run(os.Args[1:], os.Stdout, os.Stderr)
+	// Shared ssh connections are closed before leaving, whatever happened.
+	remote.CloseControl()
 	switch {
 	case err == nil:
 	case errors.Is(err, errDifferent):
@@ -421,6 +423,32 @@ func (s *session) Result(kinds []string) *diff.Result {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return diff.Compare(diff.Side{Label: s.targets[0].label, Snap: s.snaps[0]}, diff.Side{Label: s.targets[1].label, Snap: s.snaps[1]}, diff.Options{Only: kinds, Ignore: s.cfg.Ignore})
+}
+
+func (s *session) Reach(side int) (tui.Reach, string) {
+	s.mu.Lock()
+	t := s.targets[side]
+	s.mu.Unlock()
+	if t == nil || t.machine == nil {
+		return tui.Reachable, ""
+	}
+	reach, msg := remote.Check(t.machine, remote.Options{})
+	return map[remote.Reach]tui.Reach{
+		remote.Reachable:    tui.Reachable,
+		remote.NeedsHostKey: tui.NeedsHostKey,
+		remote.NeedsAuth:    tui.NeedsAuth,
+		remote.Unreachable:  tui.Unreachable,
+	}[reach], msg
+}
+
+func (s *session) Connect(side int) (*tui.Started, error) {
+	s.mu.Lock()
+	t := s.targets[side]
+	s.mu.Unlock()
+	if t == nil || t.machine == nil {
+		return nil, errors.New("this side is not reached over ssh")
+	}
+	return &tui.Started{Cmd: remote.ConnectCommand(t.machine, remote.Options{}), Cleanup: func() {}}, nil
 }
 
 func (s *session) Side(side int) tui.Side {

@@ -148,7 +148,9 @@ func sshProgram(opt Options) string {
 // plain name by config, and "--" ends ssh's options, so it cannot be read as
 // an option.
 func run(ctx context.Context, opt Options, dest, script string, stdin []byte) (stdout, stderr []byte, code int, err error) {
-	cmd := exec.CommandContext(ctx, sshProgram(opt), "-o", "ConnectTimeout=15", "-T", "--", dest, "/bin/sh -c '"+script+"'")
+	args := append([]string{"-o", "ConnectTimeout=15"}, controlArgs()...)
+	args = append(args, "-T", "--", dest, "/bin/sh -c '"+script+"'")
+	cmd := exec.CommandContext(ctx, sshProgram(opt), args...)
 	var out bytes.Buffer
 	errb := &progressWriter{fn: opt.Progress}
 	cmd.Stdout, cmd.Stderr = &out, errb
@@ -202,7 +204,7 @@ func Snapshot(m *config.Machine, opt Options) (*snapshot.Snapshot, error) {
 		}
 		osName, arch, missing := parseMissing(errOut)
 		if !missing {
-			return nil, fmt.Errorf("%s: %s", m.Name, failure(code, errOut))
+			return nil, fmt.Errorf("%s: %s%s", m.Name, failure(code, errOut), connectHint(m, errOut))
 		}
 		if m.Upload == "never" {
 			return nil, fmt.Errorf("%s: hostdiff is not installed there (upload = \"never\"); install it or set command = \"PATH\"", m.Name)

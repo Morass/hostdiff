@@ -40,7 +40,9 @@ func InstallCommand(m *config.Machine, script string, tty bool) (*exec.Cmd, func
 		flag = "-t"
 	}
 	wrapper := `trap "rm -f ` + path + `" EXIT; trap "exit 130" INT; trap "exit 129" HUP; HOSTDIFF_RESULTS=` + path + `.results /bin/sh ` + path
-	cmd := exec.Command(sshProgram(opt), "-o", "ConnectTimeout=15", flag, "--", m.SSH, "/bin/sh -c '"+wrapper+"'")
+	args := append([]string{"-o", "ConnectTimeout=15"}, controlArgs()...)
+	args = append(args, flag, "--", m.SSH, "/bin/sh -c '"+wrapper+"'")
+	cmd := exec.Command(sshProgram(opt), args...)
 	// What each step did is read back afterwards, then removed.
 	results := func() (map[int]int, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

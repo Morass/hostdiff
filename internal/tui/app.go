@@ -65,6 +65,16 @@ type Started struct {
 	Cleanup func()
 }
 
+// Reach says what stops hostdiff from using a machine on its own.
+type Reach int
+
+const (
+	Reachable Reach = iota
+	NeedsHostKey
+	NeedsAuth
+	Unreachable
+)
+
 // Backend is what the interactive mode needs from hostdiff.
 type Backend interface {
 	Here() Machine
@@ -79,6 +89,12 @@ type Backend interface {
 	// Result compares what has been collected, limited to kinds.
 	Result(kinds []string) *diff.Result
 	Side(side int) Side
+	// Reach tries the connection to one side without asking anything; the
+	// second result is what ssh said.
+	Reach(side int) (Reach, string)
+	// Connect hands the terminal to ssh, so a host key can be checked and a
+	// password typed once for the whole run.
+	Connect(side int) (*Started, error)
 }
 
 // Start says where the interactive mode begins.
@@ -102,6 +118,8 @@ type screen int
 
 const (
 	screenMachines screen = iota
+	screenCheck
+	screenConnect
 	screenGroups
 	screenScan
 	screenView
@@ -125,6 +143,12 @@ type collectedMsg struct {
 }
 
 type tickMsg struct{ gen int }
+
+type checkedMsg struct {
+	gen   int
+	reach Reach
+	msg   string
+}
 
 // App is the bubbletea model of the whole interactive mode.
 type App struct {
@@ -155,8 +179,13 @@ type App struct {
 	frame   int
 	started time.Time
 
-	view *view
-	err  string
+	view  *view
+	err   string
+	reach Reach
+	why   string
+	// pick is set when the machine or the groups were chosen here, so the
+	// group list is shown again after a connection was sorted out.
+	pick bool
 }
 
 func newApp(b Backend, st Start) *App {
@@ -169,9 +198,10 @@ func newApp(b Backend, st Start) *App {
 		a.aName = a.here.Name
 	}
 	if st.B == "" {
-		a.screen = screenMachines
+		a.screen, a.pick = screenMachines, true
 		return a
 	}
+	a.pick = st.PickGroups
 	a.bName = st.B
 	for i, m := range a.others {
 		if m.Name == st.B {
@@ -183,9 +213,12 @@ func newApp(b Backend, st Start) *App {
 		return a
 	}
 	a.kinds = st.Kinds
-	if st.PickGroups {
+	switch {
+	case a.b.Side(1).Remote:
+		a.screen = screenCheck
+	case st.PickGroups:
 		a.screen = screenGroups
-	} else {
+	default:
 		a.screen = screenScan
 	}
 	return a
@@ -195,12 +228,48 @@ func (a *App) fail(msg string) {
 	a.screen, a.err = screenError, msg
 }
 
-// Init starts scanning when the machines and sections are already known.
+// Init starts where newApp left off.
 func (a *App) Init() tea.Cmd {
-	if a.screen == screenScan {
+	switch a.screen {
+	case screenScan:
 		return a.startScan()
+	case screenCheck:
+		return a.startCheck()
 	}
 	return nil
+}
+
+// startCheck tries the connection to the other machine before anything is
+// collected, so ssh's questions are answered here and not in the dark.
+func (a *App) startCheck() tea.Cmd {
+	a.gen++
+	gen, b := a.gen, a.b
+	a.screen, a.note = screenCheck, ""
+	a.started = time.Now()
+	return tea.Batch(
+		func() tea.Msg {
+			reach, msg := b.Reach(1)
+			return checkedMsg{gen: gen, reach: reach, msg: msg}
+		},
+		tick(a.gen),
+	)
+}
+
+// connect hands the terminal to ssh, then checks again.
+func (a *App) connect() tea.Cmd {
+	run, err := a.b.Connect(1)
+	if err != nil {
+		a.why = err.Error()
+		return nil
+	}
+	a.screen = screenCheck
+	return tea.ExecProcess(run.Cmd, func(error) tea.Msg {
+		if run.Cleanup != nil {
+			run.Cleanup()
+		}
+		reach, msg := a.b.Reach(1)
+		return checkedMsg{gen: a.gen, reach: reach, msg: msg}
+	})
 }
 
 func (a *App) allKinds() []string {
@@ -301,8 +370,22 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.view.clamp()
 		a.screen = screenView
 		return a, nil
+	case checkedMsg:
+		if msg.gen != a.gen {
+			return a, nil
+		}
+		a.reach, a.why = msg.reach, msg.msg
+		if msg.reach == Reachable {
+			if !a.pick {
+				return a, a.startScan()
+			}
+			a.screen = screenGroups
+			return a, nil
+		}
+		a.screen = screenConnect
+		return a, nil
 	case tickMsg:
-		if msg.gen != a.gen || a.screen != screenScan {
+		if msg.gen != a.gen || (a.screen != screenScan && a.screen != screenCheck) {
 			return a, nil
 		}
 		a.frame++
@@ -344,9 +427,20 @@ func (a *App) key(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return a, a.keyMachines(k)
 	case screenGroups:
 		return a, a.keyGroups(k)
-	case screenScan:
+	case screenScan, screenCheck:
 		if k == "q" {
 			return a, tea.Quit
+		}
+	case screenConnect:
+		switch k {
+		case "q":
+			return a, tea.Quit
+		case "c", "enter":
+			return a, a.connect()
+		case "r":
+			return a, a.startCheck()
+		case "esc", "m", "h", "left":
+			a.screen = screenMachines
 		}
 	case screenError:
 		switch k {
@@ -434,7 +528,8 @@ func (a *App) keyMachines(k string) tea.Cmd {
 	return nil
 }
 
-// chooseMachine takes the other side and moves on to the groups.
+// chooseMachine takes the other side, checks the connection when it is one
+// that ssh has to reach, and moves on to the groups.
 func (a *App) chooseMachine(name string) tea.Cmd {
 	if strings.TrimSpace(name) == "" {
 		return nil
@@ -447,6 +542,10 @@ func (a *App) chooseMachine(name string) tea.Cmd {
 		a.view = nil
 	}
 	a.bName, a.note, a.entering = name, "", false
+	if a.b.Side(1).Remote {
+		a.kinds, a.pick = nil, true
+		return a.startCheck()
+	}
 	a.screen = screenGroups
 	return nil
 }
@@ -493,6 +592,10 @@ func (a *App) View() string {
 	switch a.screen {
 	case screenMachines:
 		return a.viewMachines()
+	case screenCheck:
+		return a.viewCheck()
+	case screenConnect:
+		return a.viewConnect()
 	case screenGroups:
 		return a.viewGroups()
 	case screenScan:
@@ -716,6 +819,60 @@ func (a *App) order(kind string) int {
 		}
 	}
 	return len(a.groups)
+}
+
+func (a *App) viewCheck() string {
+	spin := spinner[a.frame%len(spinner)]
+	lines := []string{
+		styleTitle.Render("Connecting"),
+		"",
+		fmt.Sprintf("  %s %s (%s)", spin, a.bName, a.b.Side(1).Where),
+		"",
+		styleDim.Render("  Checking that ssh can reach it without asking anything."),
+	}
+	return a.screenLines(lines, "q quit")
+}
+
+func (a *App) viewConnect() string {
+	var head, what string
+	switch a.reach {
+	case NeedsHostKey:
+		head = a.bName + " has not been connected to from this machine yet"
+		what = "ssh wants you to check its fingerprint before trusting it (or the key has changed)."
+	case NeedsAuth:
+		head = a.bName + " needs a password or a key"
+		what = "ssh could not log in without asking: no key it accepts, or password login."
+	default:
+		head = a.bName + " could not be reached"
+		what = "ssh could not connect at all: check the name, the network, or whether it is awake."
+	}
+	lines := []string{
+		styleBad.Render(head),
+		"",
+		"  " + what,
+		"",
+	}
+	for _, l := range strings.Split(a.why, "\n") {
+		if strings.TrimSpace(l) != "" {
+			lines = append(lines, styleDim.Render("  ssh: "+l))
+		}
+	}
+	lines = append(lines, "")
+	if a.reach == NeedsHostKey || a.reach == NeedsAuth {
+		lines = append(lines,
+			"  c   connect now: ssh takes over this terminal, so you can read the",
+			"      fingerprint and type the password. hostdiff keeps that one",
+			"      connection for the rest of this run, so it is asked once.",
+			"")
+		if a.reach == NeedsAuth {
+			lines = append(lines, styleDim.Render("  To stop being asked at all: ssh-copy-id "+strings.TrimPrefix(a.b.Side(1).Where, "ssh ")), "")
+		}
+	}
+	footer := "c connect · r try again · esc other machine · q quit"
+	if a.reach == Unreachable {
+		footer = "r try again · esc other machine · q quit"
+	}
+	return a.screenLines(lines, footer)
 }
 
 func (a *App) viewError() string {

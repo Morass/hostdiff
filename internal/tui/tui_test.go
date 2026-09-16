@@ -24,6 +24,9 @@ type fakeBackend struct {
 	collected []string
 	scripts   []string
 	results   map[int]int
+	reach     []Reach
+	reached   int
+	connected int
 	onCollect func(side int, s *snapshot.Snapshot)
 }
 
@@ -112,6 +115,21 @@ func (f *fakeBackend) Result(kinds []string) *diff.Result {
 	return diff.Compare(diff.Side{Label: f.labels[0], Snap: f.have[0]}, diff.Side{Label: f.labels[1], Snap: f.have[1]}, diff.Options{Only: kinds})
 }
 func (f *fakeBackend) Side(side int) Side { return f.sides[side] }
+func (f *fakeBackend) Reach(side int) (Reach, string) {
+	f.reached++
+	if f.reach == nil {
+		return Reachable, ""
+	}
+	r := f.reach[0]
+	if len(f.reach) > 1 {
+		f.reach = f.reach[1:]
+	}
+	return r, "ssh: Host key verification failed."
+}
+func (f *fakeBackend) Connect(side int) (*Started, error) {
+	f.connected++
+	return &Started{Cmd: exec.Command("true"), Cleanup: func() {}}, nil
+}
 
 func press(a *App, keys ...string) tea.Cmd {
 	var last tea.Cmd
@@ -155,8 +173,16 @@ func started(t *testing.T, f *fakeBackend, st Start) *App {
 	a := newApp(f, st)
 	a.Update(tea.WindowSizeMsg{Width: 130, Height: 30})
 	a.Init()
+	reachable(a)
 	scanned(t, a)
 	return a
+}
+
+// reachable answers the connection check the app makes before collecting.
+func reachable(a *App) {
+	if a.screen == screenCheck {
+		a.Update(checkedMsg{gen: a.gen, reach: Reachable})
+	}
 }
 
 func must(t *testing.T, view string, want ...string) {
@@ -174,6 +200,7 @@ func TestGuidedFlowPicksMachineAndGroups(t *testing.T) {
 	a.Update(tea.WindowSizeMsg{Width: 130, Height: 30})
 	must(t, a.View(), "◀ laptop", "Compare with:", "desk", "ssh box")
 	press(a, "enter")
+	reachable(a)
 	must(t, a.View(), "What should be compared?", "laptop and desk", "Homebrew", "nothing selected")
 	press(a, "space", "enter")
 	if a.screen != screenScan || !strings.Contains(a.View(), "Scanning") {
@@ -433,6 +460,7 @@ func TestCustomMachineIsTypedIn(t *testing.T) {
 	press(a, "j", "j", "enter")
 	must(t, a.View(), "Compare with:", "type a destination")
 	press(a, "m", "e", "@", "b", "o", "x", "enter")
+	reachable(a)
 	if a.bName != "me@box" || a.screen != screenGroups {
 		t.Fatalf("typed destination not used: %q, screen %v\n%s", a.bName, a.screen, a.View())
 	}
@@ -447,5 +475,44 @@ func TestCustomMachineRefusedIsExplained(t *testing.T) {
 	must(t, a.View(), "same machine")
 	if a.screen != screenMachines {
 		t.Fatalf("moved on after a refused machine")
+	}
+}
+
+// A machine whose host key is unknown is found out before anything is
+// collected, and ssh gets the terminal to sort it out.
+func TestConnectionIsCheckedFirst(t *testing.T) {
+	f := newFake()
+	f.reach = []Reach{NeedsHostKey, Reachable}
+	a := newApp(f, Start{B: "desk", Kinds: []string{"brew"}})
+	a.Update(tea.WindowSizeMsg{Width: 130, Height: 30})
+	cmd := a.Init()
+	if a.screen != screenCheck {
+		t.Fatalf("no check before collecting: %v", a.screen)
+	}
+	a.Update(cmd().(tea.BatchMsg)[0]())
+	must(t, a.View(), "desk has not been connected to from this machine yet", "ssh: Host key verification failed.", "c   connect now")
+	_, exec := a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("c")})
+	if exec == nil || f.connected != 1 {
+		t.Fatalf("c did not hand the terminal to ssh (%d)", f.connected)
+	}
+	// After the interactive connection the check runs again and scanning starts.
+	a.Update(checkedMsg{gen: a.gen, reach: Reachable})
+	scanned(t, a)
+	if a.screen != screenView {
+		t.Fatalf("did not continue after connecting: %v", a.screen)
+	}
+}
+
+func TestUnreachableMachineOffersAnother(t *testing.T) {
+	f := newFake()
+	f.reach = []Reach{Unreachable}
+	a := newApp(f, Start{B: "desk"})
+	a.Update(tea.WindowSizeMsg{Width: 130, Height: 30})
+	a.Init()
+	a.Update(checkedMsg{gen: a.gen, reach: Unreachable, msg: "ssh: connect to host desk port 22: No route to host"})
+	must(t, a.View(), "desk could not be reached", "No route to host", "r try again")
+	press(a, "esc")
+	if a.screen != screenMachines {
+		t.Fatalf("esc did not go back to the machines: %v", a.screen)
 	}
 }
