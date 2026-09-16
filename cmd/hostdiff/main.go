@@ -426,9 +426,12 @@ func (t *target) installSide(tty bool) tui.Side {
 		return tui.Side{Where: "snapshot file", NoInstall: "it is a snapshot file, not a live machine"}
 	case t.machine != nil:
 		m := t.machine
-		return tui.Side{Where: "ssh " + m.SSH, Remote: true, Prepare: func(script string) (*exec.Cmd, func(), error) {
-			cmd, err := remote.InstallCommand(m, script, tty)
-			return cmd, func() {}, err
+		return tui.Side{Where: "ssh " + m.SSH, Remote: true, Prepare: func(script string) (*tui.Started, error) {
+			cmd, results, err := remote.InstallCommand(m, script, tty)
+			if err != nil {
+				return nil, err
+			}
+			return &tui.Started{Cmd: cmd, Results: results, Cleanup: func() {}}, nil
 		}}
 	}
 	return tui.Side{Where: "this machine", Prepare: localInstaller}
@@ -436,19 +439,27 @@ func (t *target) installSide(tty bool) tui.Side {
 
 // localInstaller writes the script to a private temporary folder and runs
 // it with the PATH hostdiff collects with.
-func localInstaller(script string) (*exec.Cmd, func(), error) {
+func localInstaller(script string) (*tui.Started, error) {
 	dir, err := os.MkdirTemp("", "hostdiff-install-")
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	p := filepath.Join(dir, "install.sh")
 	if err := os.WriteFile(p, []byte(script), 0o600); err != nil {
 		os.RemoveAll(dir)
-		return nil, nil, err
+		return nil, err
 	}
+	results := filepath.Join(dir, "results")
 	cmd := exec.Command("/bin/sh", p)
-	cmd.Env = append(os.Environ(), "PATH="+collect.Current().Path)
-	return cmd, func() { os.RemoveAll(dir) }, nil
+	cmd.Env = append(os.Environ(), "PATH="+collect.Current().Path, "HOSTDIFF_RESULTS="+results)
+	return &tui.Started{
+		Cmd: cmd,
+		Results: func() (map[int]int, error) {
+			b, err := os.ReadFile(results)
+			return remote.ParseResults(string(b)), err
+		},
+		Cleanup: func() { os.RemoveAll(dir) },
+	}, nil
 }
 
 // installCLI prints what would be installed on one side, asks, runs it in
@@ -492,11 +503,12 @@ func installCLI(res *diff.Result, targets []*target, side int, yes bool, refresh
 			return nil
 		}
 	}
-	cmd, cleanup, err := how.Prepare(fix.Installer(t.label, acts, false))
+	started, err := how.Prepare(fix.Installer(t.label, acts, false))
 	if err != nil {
 		return err
 	}
-	defer cleanup()
+	defer started.Cleanup()
+	cmd := started.Cmd
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, stdout, stderr
 	runErr := cmd.Run()
 

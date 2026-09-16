@@ -23,6 +23,7 @@ type fakeBackend struct {
 	sides     [2]Side
 	collected []string
 	scripts   []string
+	results   map[int]int
 	onCollect func(side int, s *snapshot.Snapshot)
 }
 
@@ -58,9 +59,13 @@ func newFake() *fakeBackend {
 		sec("dotfiles", "Dotfiles", snapshot.Item{Key: "~/.zshrc", Value: "content 2", Detail: "alias la='ls -la'\n"}),
 	}}
 	f := &fakeBackend{full: [2]*snapshot.Snapshot{laptop, desk}}
-	prep := func(script string) (*exec.Cmd, func(), error) {
+	prep := func(script string) (*Started, error) {
 		f.scripts = append(f.scripts, script)
-		return exec.Command("true"), func() {}, nil
+		return &Started{
+			Cmd:     exec.Command("true"),
+			Results: func() (map[int]int, error) { return f.results, nil },
+			Cleanup: func() {},
+		}, nil
 	}
 	f.sides = [2]Side{{Where: "this machine", Prepare: prep}, {Where: "ssh desk", Remote: true, Prepare: prep}}
 	return f
@@ -226,9 +231,10 @@ func TestRemoveOneItem(t *testing.T) {
 	press(a, "j", "enter")
 	must(t, a.View(), "hostdiff will run these 1 commands on laptop (this machine), in this order, exactly as written:", "Remove", "  1  brew uninstall jq", "deletes 1 items from laptop", "y run")
 	press(a, "tab")
-	must(t, a.View(), "The full script, exactly as it will run", "#!/bin/sh", "step 1/1 'brew uninstall jq' brew uninstall jq")
+	must(t, a.View(), "The full script, exactly as it will run", "#!/bin/sh")
 	press(a, "tab")
 	must(t, a.View(), "  1  brew uninstall jq")
+	f.results = map[int]int{1: 0}
 	f.onCollect = func(side int, s *snapshot.Snapshot) {
 		if side == 0 {
 			items := s.Sections[0].Items[:0]
@@ -241,7 +247,7 @@ func TestRemoveOneItem(t *testing.T) {
 		}
 	}
 	run(t, a, press(a, "y"))
-	if !strings.Contains(f.scripts[0], "step 1/1 'brew uninstall jq' brew uninstall jq") || f.collected[len(f.collected)-1] != "0 [brew]" {
+	if !strings.Contains(f.scripts[0], "step 1 1 'brew uninstall jq' brew uninstall jq") || f.collected[len(f.collected)-1] != "0 [brew]" {
 		t.Errorf("script %q, collected %v", f.scripts, f.collected)
 	}
 	v := a.View()
@@ -267,6 +273,7 @@ func TestUpdateToOtherVersion(t *testing.T) {
 
 func TestCloneAsksToTypeYesWhenRemoving(t *testing.T) {
 	f := newFake()
+	f.results = map[int]int{1: 0, 2: 0, 3: 0, 4: 0}
 	a := started(t, f, Start{B: "desk", Kinds: []string{"brew"}})
 	press(a, "C")
 	must(t, a.View(), "Make laptop like desk: 1 install, 1 update, 2 remove", "Make desk like laptop")
@@ -359,4 +366,54 @@ func TestRemoteConfirmationSaysHow(t *testing.T) {
 	a := started(t, newFake(), Start{B: "desk", Kinds: []string{"brew"}})
 	press(a, "tab", "enter", "enter")
 	must(t, a.View(), "on desk (ssh desk)", "copied to desk over ssh, run there with /bin/sh", "1  brew install --cask rectangle")
+}
+
+// A command that fails is reported as failed, marked in the table, and
+// explained by "o" — never mistaken for a change that went through.
+func TestFailedCommandIsReported(t *testing.T) {
+	f := newFake()
+	f.results = map[int]int{1: 1}
+	a := started(t, f, Start{B: "desk", Kinds: []string{"brew"}})
+	press(a, "tab", "j", "enter", "j", "enter") // jq: remove from laptop
+	run(t, a, press(a, "y"))
+	v := a.View()
+	must(t, v, "laptop: 0 of 1 removed, 1 failed", "o shows what happened", "✗")
+	if !strings.Contains(v, "formula › jq") {
+		t.Errorf("an item that was not removed must stay in the table:\n%s", v)
+	}
+	press(a, "o")
+	must(t, a.View(), "What the last run did on laptop", "✗   1  brew uninstall jq  (exit 1)", "its output is in the terminal above")
+}
+
+// Commands that never ran (Ctrl-C) are not counted as done.
+func TestStoppedRunSaysNotRun(t *testing.T) {
+	f := newFake()
+	f.results = map[int]int{}
+	a := started(t, f, Start{B: "desk", Kinds: []string{"brew"}})
+	press(a, "tab", "j", "enter", "enter") // jq: install on desk
+	run(t, a, press(a, "y"))
+	must(t, a.View(), "desk: 0 of 1 installed, 1 not run")
+	press(a, "o")
+	must(t, a.View(), "never ran")
+}
+
+// Escape steps back: table → groups → machines, and back to the table.
+func TestEscapeGoesBack(t *testing.T) {
+	a := started(t, newFake(), Start{B: "desk", Kinds: []string{"brew"}})
+	press(a, "tab", "esc") // the right pane hands focus back to the groups list
+	if a.screen != screenView {
+		t.Fatalf("esc left the table too early")
+	}
+	press(a, "esc")
+	if a.screen != screenGroups {
+		t.Fatalf("esc did not go back to the groups: %v", a.screen)
+	}
+	press(a, "h")
+	if a.screen != screenMachines {
+		t.Fatalf("h did not go back to the machines: %v", a.screen)
+	}
+	press(a, "esc")
+	if a.screen != screenView {
+		t.Fatalf("esc did not return to the table: %v", a.screen)
+	}
 }

@@ -51,9 +51,18 @@ type Side struct {
 	Remote bool
 	// NoInstall says why nothing can change there (a snapshot file).
 	NoInstall string
-	// Prepare turns an installer script into the command that runs it on
-	// that machine in this terminal, and returns what to clean up afterwards.
-	Prepare func(script string) (*exec.Cmd, func(), error)
+	// Prepare turns an installer script into the run that carries it out on
+	// that machine in this terminal.
+	Prepare func(script string) (*Started, error)
+}
+
+// Started is one prepared installer run.
+type Started struct {
+	Cmd *exec.Cmd
+	// Results returns the exit status of each step, in order, once the
+	// command has finished; a step that never ran is missing.
+	Results func() (map[int]int, error)
+	Cleanup func()
 }
 
 // Backend is what the interactive mode needs from hostdiff.
@@ -346,6 +355,16 @@ func (a *App) key(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			a.screen = screenMachines
 		}
 	case screenView:
+		if k == "esc" && a.view != nil && !a.view.right && a.view.menu == nil && a.view.detail == nil && !a.view.busy && !a.view.filtering {
+			a.gsel = map[string]bool{}
+			if len(a.kinds) < len(a.groups) {
+				for _, kind := range a.kinds {
+					a.gsel[kind] = true
+				}
+			}
+			a.screen = screenGroups
+			return a, nil
+		}
 		cmd, to := a.view.key(k, msg)
 		switch to {
 		case navQuit:
@@ -370,8 +389,12 @@ func (a *App) key(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (a *App) keyMachines(k string) tea.Cmd {
 	switch k {
-	case "q", "esc":
+	case "q":
 		return tea.Quit
+	case "esc":
+		if a.view != nil {
+			a.screen = screenView
+		}
 	case "down", "j":
 		a.mcur = min(a.mcur+1, len(a.others)-1)
 	case "up", "k":
@@ -399,6 +422,10 @@ func (a *App) keyGroups(k string) tea.Cmd {
 	case "q":
 		return tea.Quit
 	case "esc", "left", "h":
+		if a.view != nil && k == "esc" {
+			a.screen = screenView
+			return nil
+		}
 		a.screen = screenMachines
 	case "down", "j":
 		a.gcur = min(a.gcur+1, len(a.groups)-1)
@@ -506,7 +533,11 @@ func (a *App) viewMachines() string {
 	if a.note != "" {
 		lines = append(lines, "", styleBad.Render(a.note))
 	}
-	return a.screenLines(lines, "↑↓ choose · enter continue · q quit")
+	footer := "↑↓ choose · enter continue · q quit"
+	if a.view != nil {
+		footer = "↑↓ choose · enter continue · esc back to the table · q quit"
+	}
+	return a.screenLines(lines, footer)
 }
 
 func (a *App) viewGroups() string {
@@ -548,7 +579,11 @@ func (a *App) viewGroups() string {
 		sum = fmt.Sprintf("%d selected", n)
 	}
 	lines = append(lines, "", styleDim.Render(sum))
-	return a.screenLines(lines, "↑↓ move · space select · a all · enter scan · esc machines · q quit")
+	footer := "↑↓ move · space select · a all · enter scan · h machines · q quit"
+	if a.view != nil {
+		footer += " · esc back to the table"
+	}
+	return a.screenLines(lines, footer)
 }
 
 func (a *App) labels() [2]string {

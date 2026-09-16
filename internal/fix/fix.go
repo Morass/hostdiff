@@ -734,22 +734,27 @@ func Installer(label string, actions []Action, wait bool) string {
 	b.WriteString(`if [ -z "$HOSTDIFF_SYSROOT" ]; then PATH="$HOME/.local/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/home/linuxbrew/.linuxbrew/bin:$HOME/.cargo/bin:$HOME/go/bin:$PATH"; export PATH; fi
 ok=0; fail=0; failed=""; stop=""
 trap 'stop=1' INT
+# Each step records its exit status, so hostdiff can say afterwards which
+# commands worked instead of guessing from a later scan.
+record() { [ -n "$HOSTDIFF_RESULTS" ] && printf '%s %s\n' "$1" "$2" >> "$HOSTDIFF_RESULTS"; return 0; }
 step() {
-	n=$1; label=$2; shift 2
+	i=$1; n=$2; label=$3; shift 3
 	[ -n "$stop" ] && return 0
-	printf '\n\033[1m==> [%s] %s\033[0m\n' "$n" "$label"
+	printf '\n\033[1m==> [%s/%s] %s\033[0m\n' "$i" "$n" "$label"
 	if ! command -v "$1" >/dev/null 2>&1; then
 		printf '\033[31m✗ %s is not installed on this machine\033[0m\n' "$1"
 		fail=$((fail+1)); failed="$failed
-  [$n] $label ($1 not installed)"
+  [$i] $label ($1 not installed)"
+		record "$i" 127
 		return 0
 	fi
 	if "$@"; then
-		ok=$((ok+1)); printf '\033[32m✓ done\033[0m\n'
+		ok=$((ok+1)); printf '\033[32m✓ done\033[0m\n'; record "$i" 0
 	else
 		rc=$?; fail=$((fail+1)); printf '\033[31m✗ failed (exit %s)\033[0m\n' "$rc"
 		failed="$failed
-  [$n] $label"
+  [$i] $label"
+		record "$i" "$rc"
 	fi
 }
 `)
@@ -764,7 +769,7 @@ step() {
 	// after "step N LABEL" comes the same text, which Command quotes so the
 	// shell reads it as the argument list and nothing more.
 	for i, a := range steps {
-		fmt.Fprintf(&b, "step %d/%d %s %s\n", i+1, n, Quote(a.Command()), a.Command())
+		fmt.Fprintf(&b, "step %d %d %s %s\n", i+1, n, Quote(a.Command()), a.Command())
 	}
 	fmt.Fprintf(&b, "printf '\\n\\033[1mhostdiff: %%d of %d done, %%d failed\\033[0m' \"$ok\" \"$fail\"\n", n)
 	b.WriteString(`[ -n "$stop" ] && printf ' (stopped with Ctrl-C)'

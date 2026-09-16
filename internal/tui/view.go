@@ -2,7 +2,6 @@ package tui
 
 import (
 	"fmt"
-	"os/exec"
 	"sort"
 	"strings"
 
@@ -56,11 +55,17 @@ type job struct {
 	had    map[string]bool
 }
 
+// outcome is what happened to one item in the last run.
+type outcome struct {
+	verb string
+	code int  // 0 succeeded
+	ran  bool // the command reported a status
+}
+
 type preparedMsg struct {
-	job     job
-	cmd     *exec.Cmd
-	cleanup func()
-	err     error
+	job job
+	run *Started
+	err error
 }
 
 type ranMsg struct {
@@ -69,9 +74,11 @@ type ranMsg struct {
 }
 
 type refreshedMsg struct {
-	job job
-	res *diff.Result
-	err error
+	job     job
+	res     *diff.Result
+	err     error
+	results map[int]int
+	resErr  error
 }
 
 // view is the comparison screen: groups on the left, a table of what
@@ -104,11 +111,13 @@ type view struct {
 
 	busy          bool
 	status        string
+	outcome       map[string]outcome
+	lastRun       []string
 	width, height int
 }
 
 func newView(b Backend, res *diff.Result) *view {
-	v := &view{b: b, sel: map[string]bool{}, cp: -1, width: 100, height: 30}
+	v := &view{b: b, sel: map[string]bool{}, outcome: map[string]outcome{}, cp: -1, width: 100, height: 30}
 	v.setResult(res)
 	for i, si := range v.secs {
 		if res.Sections[si].Differences() > 0 {
@@ -636,10 +645,11 @@ func (v *view) run() tea.Cmd {
 	prepare := v.b.Side(c.side).Prepare
 	script := fix.Installer(label, c.acts, true)
 	v.busy = true
+	v.outcome, v.lastRun = map[string]outcome{}, nil
 	v.status = "starting on " + label + "…"
 	return func() tea.Msg {
-		cmd, cleanup, err := prepare(script)
-		return preparedMsg{job: j, cmd: cmd, cleanup: cleanup, err: err}
+		run, err := prepare(script)
+		return preparedMsg{job: j, run: run, err: err}
 	}
 }
 
@@ -654,10 +664,14 @@ func (v *view) handle(msg tea.Msg) tea.Cmd {
 			return nil
 		}
 		v.status = "running on " + l[msg.job.side] + "…"
-		return tea.ExecProcess(msg.cmd, func(err error) tea.Msg { return ranMsg{preparedMsg: msg, err: err} })
+		return tea.ExecProcess(msg.run.Cmd, func(err error) tea.Msg { return ranMsg{preparedMsg: msg, err: err} })
 	case ranMsg:
-		if msg.cleanup != nil {
-			msg.cleanup()
+		results, resErr := map[int]int{}, error(nil)
+		if msg.run.Results != nil {
+			results, resErr = msg.run.Results()
+		}
+		if msg.run.Cleanup != nil {
+			msg.run.Cleanup()
 		}
 		seen := map[string]bool{}
 		var kinds []string
@@ -671,50 +685,70 @@ func (v *view) handle(msg tea.Msg) tea.Cmd {
 		b, j, all := v.b, msg.job, v.kinds
 		return func() tea.Msg {
 			if err := b.Collect(j.side, kinds, nil); err != nil {
-				return refreshedMsg{job: j, err: err}
+				return refreshedMsg{job: j, err: err, results: results, resErr: resErr}
 			}
-			return refreshedMsg{job: j, res: b.Result(all)}
+			return refreshedMsg{job: j, res: b.Result(all), results: results, resErr: resErr}
 		}
 	case refreshedMsg:
 		v.busy = false
 		for _, a := range msg.job.acts {
 			delete(v.sel, selKey(a.Kind, a.Key))
 		}
+		v.record(msg)
 		if msg.err != nil {
 			v.status = "scanning again failed: " + msg.err.Error()
 			return nil
 		}
-		snap := v.snapOf(msg.res, msg.job.side)
-		worked := 0
-		for _, a := range msg.job.acts {
-			k := selKey(a.Kind, a.Key)
-			val, has := lookup(snap, a.Kind, a.Key)
-			switch a.Verb {
-			case fix.Install:
-				if has {
-					worked++
-				}
-			case fix.Remove, fix.Reset:
-				if !has {
-					worked++
-				}
-			default:
-				if has && (!msg.job.had[k] || val != msg.job.before[k]) {
-					worked++
-				}
-			}
-		}
 		v.setResult(msg.res)
-		done := map[string]string{fix.Install: "installed", fix.Update: "updated", fix.Set: "set", fix.Remove: "removed", fix.Reset: "reset"}[msg.job.verb]
-		if msg.job.clone {
-			done = "changes took effect"
-		}
-		v.status = fmt.Sprintf("%s: %d of %d %s", l[msg.job.side], worked, len(msg.job.acts), done)
-		if worked < len(msg.job.acts) {
-			v.status += " (the command output said why; the rest are still listed)"
-		}
 	}
 	return nil
+}
+
+// record keeps what each command did, so the table can mark the items and
+// "o" can show the whole run.
+func (v *view) record(msg refreshedMsg) {
+	side := v.labels()[msg.job.side]
+	v.outcome = map[string]outcome{}
+	v.lastRun = []string{fmt.Sprintf("What the last run did on %s:", side), ""}
+	ok, failed, unknown := 0, 0, 0
+	for i, a := range msg.job.acts {
+		code, reported := msg.results[i+1]
+		v.outcome[selKey(a.Kind, a.Key)] = outcome{verb: a.Verb, code: code, ran: reported}
+		mark, tail := styleDim.Render("?"), "  (never ran: stopped, or the run ended early)"
+		switch {
+		case !reported:
+			unknown++
+		case code == 0:
+			mark, tail = styleOK.Render("✓"), ""
+			ok++
+		default:
+			mark, tail = styleBad.Render("✗"), fmt.Sprintf("  (exit %d)", code)
+			failed++
+		}
+		v.lastRun = append(v.lastRun, fmt.Sprintf("%s %3d  %s%s", mark, i+1, a.Command(), tail))
+	}
+	v.lastRun = append(v.lastRun, "")
+	if msg.resErr != nil {
+		v.lastRun = append(v.lastRun, "# The exit statuses could not be read back: "+msg.resErr.Error(), "")
+	}
+	v.lastRun = append(v.lastRun,
+		"# ✓ the command succeeded, ✗ it failed (its output is in the terminal above),",
+		"# ? it never ran.",
+		"# The groups were scanned again afterwards, so the table shows how things are now.")
+	done := map[string]string{fix.Install: "installed", fix.Update: "updated", fix.Set: "set", fix.Remove: "removed", fix.Reset: "reset"}[msg.job.verb]
+	if msg.job.clone || done == "" {
+		done = "applied"
+	}
+	v.status = fmt.Sprintf("%s: %d of %d %s", side, ok, len(msg.job.acts), done)
+	if failed > 0 {
+		v.status += fmt.Sprintf(", %d failed", failed)
+	}
+	if unknown > 0 {
+		v.status += fmt.Sprintf(", %d not run", unknown)
+	}
+	if failed+unknown > 0 {
+		v.status += " · o shows what happened"
+	}
 }
 
 func (v *view) openDetail() {
@@ -897,6 +931,12 @@ func (v *view) key(k string, msg tea.KeyMsg) (tea.Cmd, nav) {
 		v.status = "selection cleared"
 	case "v":
 		v.openDetail()
+	case "o":
+		if v.lastRun == nil {
+			v.status = "nothing has been run yet"
+			break
+		}
+		v.detail, v.detailFor, v.detailTop = v.lastRun, "The last run · esc back", 0
 	case "C":
 		v.openCloneMenu()
 	case "/":
@@ -1100,7 +1140,7 @@ func (v *view) render() string {
 	}
 	footer := "↑↓ move · tab/enter open · v details · / filter · a same · d deps · s script · c groups · m machines · r rescan · q quit"
 	if v.canChange() {
-		footer = "space select · enter actions · C clone · v details · / filter · a same · d deps · c groups · m machines · r rescan · q quit"
+		footer = "space select · enter actions · C clone · v details · o last run · / filter · a same · d deps · c groups · esc/m back · q quit"
 	}
 	if v.busy {
 		footer = "working… (ctrl+c quits hostdiff)"
@@ -1164,7 +1204,7 @@ func (v *view) renderRight(rw, h int) []string {
 	for _, r := range rows {
 		kw = max(kw, ansi.StringWidth(name(r)))
 	}
-	pick := v.canChange() || len(v.sel) > 0
+	pick := v.canChange() || len(v.sel) > 0 || len(v.outcome) > 0
 	fixed := 2 + 2 + 2 + 1 // mark, selection, gaps
 	kw = min(kw, (rw-fixed)/2)
 	vw := max(6, (rw-fixed-kw)/2)
@@ -1195,9 +1235,17 @@ func (v *view) renderRight(rw, h int) []string {
 		}
 		line := mark + " "
 		if pick {
-			if v.sel[selKey(r.kind, r.key)] {
+			o, ran := v.outcome[selKey(r.kind, r.key)]
+			switch {
+			case v.sel[selKey(r.kind, r.key)]:
 				line += styleBold.Render("●") + " "
-			} else {
+			case ran && o.ran && o.code == 0:
+				line += styleOK.Render("✓") + " "
+			case ran && o.ran:
+				line += styleBad.Render("✗") + " "
+			case ran:
+				line += styleDim.Render("?") + " "
+			default:
 				line += "  "
 			}
 		}

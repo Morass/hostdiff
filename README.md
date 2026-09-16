@@ -74,8 +74,13 @@ the affected groups are scanned again. `C` (clone) makes one machine like
 the other in the compared groups: installs, updates and removals together,
 and it asks you to type `yes` when anything would be removed. Other keys:
 `v` details and content diffs, `/` filter, `a` also same items, `d`
-dependencies, `s` the install script, `c` other groups, `m` other machine,
-`r` rescan.
+dependencies, `s` the install script, `o` what the last run did, `c` other
+groups, `m` other machine, `r` rescan, `esc` back a screen.
+
+After a run, each item it touched is marked in the table: `✓` the command
+succeeded, `✗` it failed (with its exit status under `o`), `?` it never ran.
+The status line counts them, and the affected groups are scanned again, so
+an item that still differs really does still differ.
 
 Installing without the table: `hostdiff diff laptop --install localhost`
 lists the commands that bring laptop's items here and asks (`--yes` skips

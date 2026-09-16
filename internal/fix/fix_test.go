@@ -295,7 +295,7 @@ func TestInstallerRunsTheShownCommands(t *testing.T) {
 	}
 	script := Installer("desk", acts, true)
 	for i, a := range acts {
-		line := fmt.Sprintf("step %d/2 %s %s", i+1, Quote(a.Command()), a.Command())
+		line := fmt.Sprintf("step %d 2 %s %s", i+1, Quote(a.Command()), a.Command())
 		if !strings.Contains(script, "\n"+line+"\n") {
 			t.Errorf("missing step line %q in:\n%s", line, script)
 		}

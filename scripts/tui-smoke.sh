@@ -110,7 +110,7 @@ keys Enter
 wait_for "type yes"
 keys y e s Enter
 finish
-wait_for "changes took effect"
+wait_for "of 2 applied"
 
 grep -q "wget 9.9.9" "$w/remotes/laptop/.fixture/formulae"
 ! grep -q "ripgrep" "$w/remotes/laptop/.fixture/formulae"
