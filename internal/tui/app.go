@@ -49,6 +49,9 @@ type Side struct {
 	Where string
 	// Remote is true when commands reach the machine over ssh.
 	Remote bool
+	// Dest is the ssh destination of a remote machine, for the commands
+	// that have to name it (copying a file between the two).
+	Dest string
 	// NoInstall says why nothing can change there (a snapshot file).
 	NoInstall string
 	// Prepare turns an installer script into the run that carries it out on

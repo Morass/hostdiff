@@ -708,7 +708,11 @@ func fonts(e *Env, s *snapshot.Section) {
 				return filepath.SkipDir
 			}
 			if !de.IsDir() && fontExt[strings.ToLower(filepath.Ext(p))] {
-				s.Add(de.Name(), d.label, "")
+				// The path inside the folder is a tag: it is not compared
+				// (the same font in another subfolder is the same font) but
+				// it is what a copy needs.
+				rel := strings.TrimPrefix(strings.TrimPrefix(p, d.dir), string(os.PathSeparator))
+				s.AddTag(de.Name(), d.label, rel)
 			}
 			return nil
 		})

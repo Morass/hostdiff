@@ -486,7 +486,7 @@ func (t *target) installSide(tty bool) tui.Side {
 		return tui.Side{Where: "snapshot file", NoInstall: "it is a snapshot file, not a live machine"}
 	case t.machine != nil:
 		m := t.machine
-		return tui.Side{Where: "ssh " + m.SSH, Remote: true, Prepare: func(script string) (*tui.Started, error) {
+		return tui.Side{Where: "ssh " + m.SSH, Remote: true, Dest: m.SSH, Prepare: func(script string) (*tui.Started, error) {
 			cmd, results, err := remote.InstallCommand(m, script, tty)
 			if err != nil {
 				return nil, err

@@ -291,24 +291,68 @@ func (v *view) clamp() {
 
 func selKey(kind, key string) string { return kind + "\x00" + key }
 
+// osOf is the operating system a side runs, as its snapshot recorded it.
+func (v *view) osOf(side int) string {
+	snap := v.snapOf(v.res, side)
+	if snap == nil {
+		return ""
+	}
+	return snap.Host.OS
+}
+
+// copyAction returns the command that copies a file from one machine to the
+// other. Only files hostdiff holds no content for (fonts) are copied this
+// way, and only between this machine and one reached over ssh.
+func (v *view) copyAction(r row, to int) (fix.Action, bool) {
+	if r.kind != "fonts" || r.item == nil {
+		return fix.Action{}, false
+	}
+	from := 1 - to
+	sideTo, sideFrom := v.b.Side(to), v.b.Side(from)
+	switch {
+	case sideTo.Remote && !sideFrom.Remote && sideFrom.Prepare != nil:
+		// From this machine to the other one.
+		a, ok := fix.ForCopy(r.kind, *r.item, v.osOf(from), v.osOf(to), sideTo.Dest, true)
+		return a, ok
+	case sideFrom.Remote && !sideTo.Remote && sideTo.Prepare != nil:
+		a, ok := fix.ForCopy(r.kind, *r.item, v.osOf(to), v.osOf(from), sideFrom.Dest, false)
+		return a, ok
+	}
+	return fix.Action{Kind: r.kind, Key: r.key, Verb: fix.Copy, Note: "a font can only be copied between this machine and one reached over ssh"}, true
+}
+
 // actions returns what hostdiff can do about a row, on each side.
-func actions(r row) []sideAction {
+func (v *view) actions(r row) []sideAction {
 	var out []sideAction
 	add := func(side int, a fix.Action, ok bool) {
 		if ok {
 			out = append(out, sideAction{side, a})
 		}
 	}
+	// A copy runs on whichever machine has ssh, which is this one.
+	addCopy := func(to int) {
+		a, ok := v.copyAction(r, to)
+		if !ok {
+			return
+		}
+		on := to
+		if v.b.Side(to).Remote {
+			on = 1 - to
+		}
+		out = append(out, sideAction{on, a})
+	}
 	switch r.mark {
 	case "◀":
 		a, ok := fix.ForMissing(r.kind, *r.item)
 		add(1, a, ok)
-		a, ok = fix.ForRemove(r.kind, *r.item)
+		addCopy(1)
+		a, ok = fix.ForRemove(r.kind, *r.item, v.osOf(0))
 		add(0, a, ok)
 	case "▶":
 		a, ok := fix.ForMissing(r.kind, *r.item)
 		add(0, a, ok)
-		a, ok = fix.ForRemove(r.kind, *r.item)
+		addCopy(0)
+		a, ok = fix.ForRemove(r.kind, *r.item, v.osOf(1))
 		add(1, a, ok)
 	case "≠":
 		c := r.change
@@ -316,13 +360,14 @@ func actions(r row) []sideAction {
 		add(0, a, ok)
 		a, ok = fix.ForUpdate(r.kind, c.Key, c.A, c.TagA, c.B, c.TagB)
 		add(1, a, ok)
-		a, ok = fix.ForRemove(r.kind, snapshot.Item{Key: c.Key, Value: c.A, Tag: c.TagA})
+		a, ok = fix.ForRemove(r.kind, snapshot.Item{Key: c.Key, Value: c.A, Tag: c.TagA}, v.osOf(0))
 		add(0, a, ok)
-		a, ok = fix.ForRemove(r.kind, snapshot.Item{Key: c.Key, Value: c.B, Tag: c.TagB})
+		a, ok = fix.ForRemove(r.kind, snapshot.Item{Key: c.Key, Value: c.B, Tag: c.TagB}, v.osOf(1))
 		add(1, a, ok)
 	case "=":
-		a, ok := fix.ForRemove(r.kind, *r.item)
+		a, ok := fix.ForRemove(r.kind, *r.item, v.osOf(0))
 		add(0, a, ok)
+		a, ok = fix.ForRemove(r.kind, *r.item, v.osOf(1))
 		add(1, a, ok)
 	}
 	return out
@@ -357,7 +402,7 @@ func (v *view) targets() []row {
 	return out
 }
 
-var verbOrder = map[string]int{fix.Install: 0, fix.Update: 1, fix.Set: 2, fix.Remove: 3, fix.Reset: 4}
+var verbOrder = map[string]int{fix.Install: 0, fix.Copy: 1, fix.Update: 2, fix.Set: 3, fix.Remove: 4, fix.Reset: 5}
 
 func (v *view) sideProblem(side int) string {
 	s := v.b.Side(side)
@@ -378,7 +423,7 @@ func (v *view) openMenu() {
 	byKey := map[[2]int]*choice{}
 	var list []*choice
 	for _, r := range rows {
-		for _, sa := range actions(r) {
+		for _, sa := range v.actions(r) {
 			id := [2]int{verbOrder[sa.act.Verb], sa.side}
 			c := byKey[id]
 			if c == nil {
@@ -483,6 +528,13 @@ func (v *view) choiceLabel(c choice) string {
 		return s
 	case c.verb == fix.Install:
 		s = icon(c.verb) + " Install on " + on
+	case c.verb == fix.Copy:
+		// A copy runs here but lands on whichever machine lacks the file.
+		to := other
+		if !v.b.Side(c.side).Remote && !v.b.Side(1-c.side).Remote {
+			to = other
+		}
+		s = icon(c.verb) + " Copy the file to " + to
 	case c.verb == fix.Update:
 		s = icon(c.verb) + fmt.Sprintf(" Update on %s to %s's version", on, other)
 	case c.verb == fix.Set:
@@ -503,7 +555,7 @@ func (v *view) choiceLabel(c choice) string {
 }
 
 func verbTitle(verb string) string {
-	return map[string]string{fix.Install: "Install", fix.Update: "Update", fix.Set: "Set", fix.Remove: "Remove", fix.Reset: "Reset"}[verb]
+	return map[string]string{fix.Install: "Install", fix.Copy: "Copy", fix.Update: "Update", fix.Set: "Set", fix.Remove: "Remove", fix.Reset: "Reset"}[verb]
 }
 
 // icon marks what an action does, in the same colours the rest of the view
@@ -512,6 +564,8 @@ func icon(verb string) string {
 	switch verb {
 	case fix.Install:
 		return styleOK.Render("✚")
+	case fix.Copy:
+		return styleOK.Render("⇒")
 	case fix.Update:
 		return styleB.Render("↑")
 	case fix.Set:
@@ -737,7 +791,7 @@ func (v *view) record(msg refreshedMsg) {
 		"# ✓ the command succeeded, ✗ it failed (its output is in the terminal above),",
 		"# ? it never ran.",
 		"# The groups were scanned again afterwards, so the table shows how things are now.")
-	done := map[string]string{fix.Install: "installed", fix.Update: "updated", fix.Set: "set", fix.Remove: "removed", fix.Reset: "reset"}[msg.job.verb]
+	done := map[string]string{fix.Install: "installed", fix.Copy: "copied", fix.Update: "updated", fix.Set: "set", fix.Remove: "removed", fix.Reset: "reset"}[msg.job.verb]
 	if msg.job.clone || done == "" {
 		done = "applied"
 	}
@@ -933,6 +987,10 @@ func (v *view) key(k string, msg tea.KeyMsg) (tea.Cmd, nav) {
 		v.openMenu()
 	case " ":
 		v.toggle()
+	case "A":
+		v.selectAll(false)
+	case "ctrl+a":
+		v.selectAll(true)
 	case "x":
 		v.sel = map[string]bool{}
 		v.status = "selection cleared"
@@ -978,6 +1036,50 @@ func (v *view) up() {
 		v.sp--
 	}
 	v.row, v.top = 0, 0
+}
+
+// selectAll selects every row of the group, or of every group, and clears
+// them again when they are all selected already.
+func (v *view) selectAll(everything bool) {
+	var rows []row
+	what := "in " + v.sectionTitle()
+	if everything {
+		what = "in every group"
+		for i := range v.res.Sections {
+			rows = append(rows, sectionRows(&v.res.Sections[i], "", v.showSame, v.showDeps)...)
+		}
+	} else {
+		rows = v.rows()
+	}
+	if len(rows) == 0 {
+		return
+	}
+	all := true
+	for _, r := range rows {
+		all = all && v.sel[selKey(r.kind, r.key)]
+	}
+	for _, r := range rows {
+		if all {
+			delete(v.sel, selKey(r.kind, r.key))
+		} else {
+			v.sel[selKey(r.kind, r.key)] = true
+		}
+	}
+	if all {
+		v.status = fmt.Sprintf("unselected %d items %s", len(rows), what)
+	} else {
+		v.status = fmt.Sprintf("selected %d items %s · enter shows what can be done", len(rows), what)
+	}
+}
+
+func (v *view) sectionTitle() string {
+	if s := v.section(); s != nil {
+		if p := v.prefix(); p != "" {
+			return p
+		}
+		return s.Title
+	}
+	return "this group"
 }
 
 // toggle selects the current row, or on the left every row of the group.
@@ -1150,7 +1252,7 @@ func (v *view) render() string {
 	}
 	footer := "↑↓ move · tab/enter open · v details · / filter · a same · d deps · s script · c groups · m machines · r rescan · q quit"
 	if v.canChange() {
-		footer = "space select · enter actions · C clone · v details · o last run · / filter · a same · d deps · c groups · esc/m back · q quit"
+		footer = "space select · A all here · ctrl+a everything · enter actions · C clone · v details · o last run · / filter · a same · d deps · c groups · esc/m back · q quit"
 	}
 	if v.busy {
 		footer = "working… (ctrl+c quits hostdiff)"

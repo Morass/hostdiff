@@ -48,6 +48,7 @@ func newFake() *fakeBackend {
 			snapshot.Item{Key: "python3.12 › requests", Value: "2.32.3", Tag: "user"},
 			snapshot.Item{Key: "gem › rake", Value: "13.2.1"}),
 		sec("dotfiles", "Dotfiles", snapshot.Item{Key: "~/.zshrc", Value: "content 1", Detail: "alias ll='ls -l'\n"}),
+		sec("fonts", "Fonts", snapshot.Item{Key: "Inter.ttf", Value: "user", Tag: "Inter.ttf"}),
 	}}
 	desk := &snapshot.Snapshot{Format: 1, Created: time.Unix(0, 0), Host: host("dsk"), Sections: []snapshot.Section{
 		sec("brew", "Homebrew",
@@ -60,6 +61,7 @@ func newFake() *fakeBackend {
 			snapshot.Item{Key: "python3.12 › numpy", Value: "2.0", Tag: "system"},
 			snapshot.Item{Key: "gem › rake", Value: "13.2.1"}),
 		sec("dotfiles", "Dotfiles", snapshot.Item{Key: "~/.zshrc", Value: "content 2", Detail: "alias la='ls -la'\n"}),
+		sec("fonts", "Fonts", snapshot.Item{Key: "Fira.ttf", Value: "user", Tag: "Fira.ttf"}),
 	}}
 	f := &fakeBackend{full: [2]*snapshot.Snapshot{laptop, desk}}
 	prep := func(script string) (*Started, error) {
@@ -70,7 +72,7 @@ func newFake() *fakeBackend {
 			Cleanup: func() {},
 		}, nil
 	}
-	f.sides = [2]Side{{Where: "this machine", Prepare: prep}, {Where: "ssh desk", Remote: true, Prepare: prep}}
+	f.sides = [2]Side{{Where: "this machine", Prepare: prep}, {Where: "ssh desk", Remote: true, Dest: "desk", Prepare: prep}}
 	return f
 }
 
@@ -83,6 +85,7 @@ func (f *fakeBackend) Groups() []Group {
 		{Kind: "brew", Title: "Homebrew", Reads: "brew list"},
 		{Kind: "libraries", Title: "Language libraries", Reads: "python, gems"},
 		{Kind: "dotfiles", Title: "Dotfiles", Reads: "shell files"},
+		{Kind: "fonts", Title: "Fonts", Reads: "font files"},
 	}
 }
 func (f *fakeBackend) Select(a, b string) error {
@@ -144,6 +147,8 @@ func press(a *App, keys ...string) tea.Cmd {
 			msg = tea.KeyMsg{Type: tea.KeyTab}
 		case "space":
 			msg = tea.KeyMsg{Type: tea.KeySpace, Runes: []rune{' '}}
+		case "ctrl+a":
+			msg = tea.KeyMsg{Type: tea.KeyCtrlA}
 		case "backspace":
 			msg = tea.KeyMsg{Type: tea.KeyBackspace}
 		default:
@@ -534,4 +539,31 @@ func TestEnterConfirms(t *testing.T) {
 		t.Fatalf("enter did not run the commands: %v", f.scripts)
 	}
 	must(t, a.View(), "desk: 1 of 1 installed")
+}
+
+// A font only exists as a file, so hostdiff offers to copy it over ssh.
+func TestFontIsCopied(t *testing.T) {
+	f := newFake()
+	f.results = map[int]int{1: 0}
+	a := started(t, f, Start{B: "desk", Kinds: []string{"fonts"}})
+	press(a, "tab", "enter")
+	must(t, a.View(), "Copy the file to desk", "Remove from laptop")
+	press(a, "enter")
+	must(t, a.View(), "Copy", "ssh -- desk", "$HOME/Library/Fonts/Inter.ttf")
+	run(t, a, press(a, "enter"))
+	must(t, a.View(), "laptop: 1 of 1 copied")
+}
+
+// A and ctrl+a select whole groups at once.
+func TestSelectAll(t *testing.T) {
+	a := started(t, newFake(), Start{B: "desk", Kinds: []string{"brew", "fonts"}})
+	press(a, "tab", "A")
+	must(t, a.View(), "selected 4 items in Homebrew")
+	press(a, "ctrl+a")
+	v := a.View()
+	if !strings.Contains(v, "selected 6 items in every group") {
+		t.Fatalf("ctrl+a:\n%s", v)
+	}
+	press(a, "ctrl+a")
+	must(t, a.View(), "unselected 6 items in every group")
 }

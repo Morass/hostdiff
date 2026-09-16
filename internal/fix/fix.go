@@ -47,6 +47,7 @@ type Action struct {
 // Verbs.
 const (
 	Install = "install"
+	Copy    = "copy"
 	Update  = "update"
 	Remove  = "remove"
 	Set     = "set"
@@ -163,6 +164,64 @@ func ForMissing(kind string, it snapshot.Item) (a Action, ok bool) {
 	return Action{}, false
 }
 
+// fontDir is where a user's own fonts live.
+// firstOS is the optional operating-system argument of ForRemove.
+func firstOS(s []string) string {
+	if len(s) == 0 {
+		return ""
+	}
+	return s[0]
+}
+
+func fontDir(os string) string {
+	if os == "darwin" {
+		return "Library/Fonts"
+	}
+	return ".local/share/fonts"
+}
+
+// fontPath is the shell text for a font file inside the home folder, or
+// false when the name holds something a shell would read as code.
+var fontNameRe = regexp.MustCompile(`^[^"'` + "`" + `$\\\x00-\x1f]{1,150}$`)
+
+func fontPath(osName, rel string) (string, bool) {
+	if !fontNameRe.MatchString(rel) || strings.Contains(rel, "..") {
+		return "", false
+	}
+	return `"$HOME/` + fontDir(osName) + "/" + rel + `"`, true
+}
+
+// ForCopy returns the command that copies a font the other machine has (or
+// lacks) between the two, run on the machine that has ssh: the local one.
+// dest is the ssh destination of the other machine, toRemote says which way
+// the file goes, and the two OS names say where fonts live on each side.
+func ForCopy(kind string, it snapshot.Item, localOS, remoteOS, dest string, toRemote bool) (a Action, ok bool) {
+	defer func() { a.Verb = Copy }()
+	if kind != "fonts" || dest == "" {
+		return Action{}, false
+	}
+	if it.Value != "user" {
+		return note(kind, it.Key, "a system font: copy it yourself, it needs an administrator"), true
+	}
+	rel := it.Tag
+	if rel == "" {
+		rel = it.Key
+	}
+	local, ok1 := fontPath(localOS, rel)
+	remote, ok2 := fontPath(remoteOS, rel)
+	if !ok1 || !ok2 {
+		return skipped(kind, it.Key, "the file name holds characters a shell would read as code"), true
+	}
+	remoteDir := `"$HOME/` + fontDir(remoteOS) + `"`
+	localDir := `"$HOME/` + fontDir(localOS) + `"`
+	if toRemote {
+		return run(kind, it.Key, "/bin/sh", "-c",
+			"ssh -- "+dest+" 'mkdir -p "+remoteDir+" && cat > "+remote+"' < "+local), true
+	}
+	return run(kind, it.Key, "/bin/sh", "-c",
+		"mkdir -p "+localDir+" && ssh -- "+dest+" 'cat "+remote+"' > "+local), true
+}
+
 // ForChange returns what makes the machine that has c's "have" side match
 // the "want" side.
 func ForChange(kind string, key, want, wantTag, have, haveTag string) (a Action, ok bool) {
@@ -191,7 +250,9 @@ func verb(kind, v string) string {
 }
 
 // ForRemove returns what removes an item from the machine that has it.
-func ForRemove(kind string, it snapshot.Item) (a Action, ok bool) {
+// osName is the operating system of the machine the removal runs on; it is
+// only needed where the path depends on it (fonts).
+func ForRemove(kind string, it snapshot.Item, osName ...string) (a Action, ok bool) {
 	defer func() { a.Verb = verb(kind, Remove) }()
 	key := it.Key
 	prefixed := func(prefix string, cmd ...string) (Action, bool) {
@@ -256,6 +317,20 @@ func ForRemove(kind string, it snapshot.Item) (a Action, ok bool) {
 		return removeToolchain(key)
 	case "apps":
 		return note(kind, key, "move the app to the Trash yourself (or remove its cask under Homebrew)"), true
+	case "fonts":
+		if it.Value != "user" {
+			return note(kind, key, "a system font: remove it yourself, it needs an administrator"), true
+		}
+		rel := it.Tag
+		if rel == "" {
+			rel = key
+		}
+		// The machine this runs on is the one that has the font.
+		p, ok := fontPath(firstOS(osName), rel)
+		if !ok {
+			return skipped(kind, key, "the file name holds characters a shell would read as code"), true
+		}
+		return run(kind, key, "/bin/sh", "-c", "rm -f "+p), true
 	}
 	return Action{}, false
 }

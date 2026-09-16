@@ -310,3 +310,50 @@ func TestInstallerRunsTheShownCommands(t *testing.T) {
 		t.Errorf("%d step lines, want 2", commands)
 	}
 }
+
+// A font is a file: hostdiff copies it between the machines, and removes a
+// user font, but never touches a system one.
+func TestFontCopyAndRemove(t *testing.T) {
+	font := snapshot.Item{Key: "Inter Var.ttf", Value: "user", Tag: "Inter/Inter Var.ttf"}
+	a, ok := ForCopy("fonts", font, "darwin", "linux", "me@box", true)
+	if !ok || a.Verb != Copy || !strings.Contains(a.Argv[2], `ssh -- me@box 'mkdir -p "$HOME/.local/share/fonts" && cat > "$HOME/.local/share/fonts/Inter/Inter Var.ttf"' < "$HOME/Library/Fonts/Inter/Inter Var.ttf"`) {
+		t.Errorf("copy to the other machine: %q", a.Command())
+	}
+	a, _ = ForCopy("fonts", font, "darwin", "darwin", "me@box", false)
+	if !strings.Contains(a.Argv[2], `ssh -- me@box 'cat "$HOME/Library/Fonts/Inter/Inter Var.ttf"' > "$HOME/Library/Fonts/Inter/Inter Var.ttf"`) {
+		t.Errorf("copy from the other machine: %q", a.Command())
+	}
+	a, _ = ForRemove("fonts", font, "darwin")
+	if a.Verb != Remove || !strings.Contains(a.Argv[2], `rm -f "$HOME/Library/Fonts/Inter/Inter Var.ttf"`) {
+		t.Errorf("remove: %q", a.Command())
+	}
+	for _, bad := range []snapshot.Item{
+		{Key: "Helvetica.ttc", Value: "system"},
+		{Key: "x\".ttf", Value: "user", Tag: "x\".ttf"},
+		{Key: "esc.ttf", Value: "user", Tag: "../../../etc/passwd"},
+	} {
+		if a, _ := ForCopy("fonts", bad, "darwin", "darwin", "me@box", true); a.Runnable() {
+			t.Errorf("%q must not be copied: %q", bad.Key, a.Command())
+		}
+		if a, _ := ForRemove("fonts", bad, "darwin"); a.Runnable() {
+			t.Errorf("%q must not be removed: %q", bad.Key, a.Command())
+		}
+	}
+}
+
+// The copy command is one argument list the shell reads literally.
+func TestFontCopyQuoting(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "pwned")
+	for _, name := range []string{"a b.ttf", "x$(touch " + marker + ").ttf", "y`touch " + marker + "`.ttf", "z;touch " + marker + ".ttf"} {
+		a, _ := ForCopy("fonts", snapshot.Item{Key: name, Value: "user", Tag: name}, "darwin", "darwin", "me@box", true)
+		if !a.Runnable() {
+			continue
+		}
+		if strings.Contains(a.Command(), marker) && !strings.Contains(a.Command(), "'") {
+			t.Errorf("unquoted: %q", a.Command())
+		}
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("a font name ran a command")
+	}
+}
