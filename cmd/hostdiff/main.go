@@ -15,6 +15,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"regexp"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"sync"
@@ -34,8 +35,18 @@ import (
 	"github.com/morass/hostdiff/internal/tui"
 )
 
-// Version is set at build time with -ldflags "-X main.Version=...".
+// Version is set at build time with -ldflags "-X main.Version=...", or taken
+// from the module version when installed with go install.
 var Version = "0.1.0-dev"
+
+func init() {
+	if Version != "0.1.0-dev" {
+		return
+	}
+	if bi, ok := debug.ReadBuildInfo(); ok && bi.Main.Version != "" && bi.Main.Version != "(devel)" {
+		Version = strings.TrimPrefix(bi.Main.Version, "v")
+	}
+}
 
 // errDifferent makes diff exit 1 without printing an error.
 var errDifferent = errors.New("differences found")
