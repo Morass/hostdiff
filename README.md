@@ -67,7 +67,7 @@ install, update to the other machine's version, remove, or set and reset a
 setting; each is marked with what it does (✚ install, ↑ update, ✎ set,
 ✗ remove, ↺ reset, ⇄ clone). Every choice opens a confirmation that lists the numbered command
 lines exactly as they will run, says how they reach the machine, and shows
-the whole script on `tab`; `y` runs them in your terminal, on this machine directly and on the other over ssh
+the whole script on `tab`; `enter` (or `y`) runs them in your terminal, on this machine directly and on the other over ssh
 with a terminal, so `sudo` and installer prompts work. Steps run one by one,
 a failure does not stop the rest, Ctrl-C stops after the current step, and
 the affected groups are scanned again. `C` (clone) makes one machine like

@@ -571,7 +571,7 @@ func (v *view) openConfirm(c choice) {
 		"# Afterwards the affected groups are scanned again (read only). Tab shows the full script.")
 	v.confirm, v.typed, v.confirmed = &c, "", nil
 	v.detail, v.detailTop = lines, 0
-	v.detailFor = "Confirm: y runs these commands, esc cancels"
+	v.detailFor = "Confirm: enter (or y) runs these commands, esc cancels"
 	if v.needTyped() {
 		v.detailFor = "Confirm: type yes and press enter to run, esc cancels"
 	}
@@ -833,11 +833,12 @@ func (v *view) key(k string, msg tea.KeyMsg) (tea.Cmd, nav) {
 			return nil, navNone
 		}
 		switch k {
-		case "y":
+		case "y", "enter":
 			if v.confirm != nil {
 				return v.run(), navNone
 			}
-		case "q", "esc", "enter", "left", "h", "n":
+			v.detail, v.confirm, v.confirmed = nil, nil, nil
+		case "q", "esc", "left", "h", "n":
 			v.detail, v.confirm, v.confirmed = nil, nil, nil
 		case "down", "j":
 			v.detailTop++
@@ -1072,7 +1073,7 @@ func (v *view) render() string {
 		case v.needTyped():
 			footer = "type yes and press enter to run: " + v.typed + "▏ · tab full script · esc cancels"
 		case v.confirm != nil:
-			footer = "y run · tab full script · esc cancel · ↑↓ scroll"
+			footer = "enter or y: run · tab full script · esc cancel · ↑↓ scroll"
 		}
 		b.WriteString(styleBold.Render(truncate(footer, w)))
 		return b.String()

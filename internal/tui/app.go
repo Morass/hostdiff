@@ -582,6 +582,11 @@ func (a *App) keyGroups(k string) tea.Cmd {
 				a.kinds = append(a.kinds, g.Kind)
 			}
 		}
+		if len(a.kinds) == 0 {
+			// Scanning everything by accident is slow and surprising.
+			a.note = "Nothing is selected: space picks a group, a selects them all."
+			return nil
+		}
 		return a.startScan()
 	}
 	return nil
@@ -716,12 +721,15 @@ func (a *App) viewGroups() string {
 			n++
 		}
 	}
-	sum := "nothing selected: enter compares everything"
+	sum := styleDim.Render("nothing selected yet: space picks a group, a selects them all")
 	if n > 0 {
-		sum = fmt.Sprintf("%d selected", n)
+		sum = styleDim.Render(fmt.Sprintf("%d selected", n))
 	}
-	lines = append(lines, "", styleDim.Render(sum))
-	footer := "↑↓ move · space select · a all · enter scan · esc back to the machines · q quit"
+	if a.note != "" {
+		sum = styleBad.Render(a.note)
+	}
+	lines = append(lines, "", sum)
+	footer := "↑↓ move · space select · a all · enter scan the selected · esc back to the machines · q quit"
 	return a.screenLines(lines, footer)
 }
 

@@ -201,7 +201,12 @@ func TestGuidedFlowPicksMachineAndGroups(t *testing.T) {
 	must(t, a.View(), "◀ laptop", "Compare with:", "desk", "ssh box")
 	press(a, "enter")
 	reachable(a)
-	must(t, a.View(), "What should be compared?", "laptop and desk", "Homebrew", "nothing selected")
+	must(t, a.View(), "What should be compared?", "laptop and desk", "Homebrew", "nothing selected yet")
+	press(a, "enter")
+	must(t, a.View(), "Nothing is selected: space picks a group")
+	if a.screen != screenGroups {
+		t.Fatal("enter with nothing selected started a scan")
+	}
 	press(a, "space", "enter")
 	if a.screen != screenScan || !strings.Contains(a.View(), "Scanning") {
 		t.Fatalf("not scanning:\n%s", a.View())
@@ -256,7 +261,7 @@ func TestRemoveOneItem(t *testing.T) {
 	press(a, "tab", "j", "enter")
 	must(t, a.View(), "formula › jq", "Install on desk", "Remove from laptop")
 	press(a, "j", "enter")
-	must(t, a.View(), "hostdiff will run these 1 commands on laptop (this machine), in this order, exactly as written:", "Remove", "  1  brew uninstall jq", "deletes 1 items from laptop", "y run")
+	must(t, a.View(), "hostdiff will run these 1 commands on laptop (this machine), in this order, exactly as written:", "Remove", "  1  brew uninstall jq", "deletes 1 items from laptop", "enter or y: run")
 	press(a, "tab")
 	must(t, a.View(), "The full script, exactly as it will run", "#!/bin/sh")
 	press(a, "tab")
@@ -295,7 +300,7 @@ func TestUpdateToOtherVersion(t *testing.T) {
 	press(a, "tab", "j", "j", "j", "enter")
 	must(t, a.View(), "Update on laptop to desk's version", "Update on desk to laptop's version", "Remove from laptop", "Remove from desk")
 	press(a, "enter")
-	must(t, a.View(), "Update", "  1  brew upgrade node")
+	must(t, a.View(), "Update", "  1  brew upgrade node", "enter (or y) runs these commands")
 }
 
 func TestCloneAsksToTypeYesWhenRemoving(t *testing.T) {
@@ -515,4 +520,18 @@ func TestUnreachableMachineOffersAnother(t *testing.T) {
 	if a.screen != screenMachines {
 		t.Fatalf("esc did not go back to the machines: %v", a.screen)
 	}
+}
+
+// Enter confirms on the confirmation screen, like y.
+func TestEnterConfirms(t *testing.T) {
+	f := newFake()
+	f.results = map[int]int{1: 0}
+	a := started(t, f, Start{B: "desk", Kinds: []string{"brew"}})
+	press(a, "tab", "j", "enter", "enter") // jq: install on desk
+	must(t, a.View(), "1  brew install jq")
+	run(t, a, press(a, "enter"))
+	if len(f.scripts) != 1 {
+		t.Fatalf("enter did not run the commands: %v", f.scripts)
+	}
+	must(t, a.View(), "desk: 1 of 1 installed")
 }
