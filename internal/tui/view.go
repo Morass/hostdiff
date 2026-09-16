@@ -451,12 +451,12 @@ func (v *view) choiceLabel(c choice) string {
 	l := v.labels()
 	on, other := l[c.side], l[1-c.side]
 	if c.details {
-		return "Show details"
+		return styleDim.Render("…") + " Show details"
 	}
 	var s string
 	switch {
 	case c.clone:
-		s = fmt.Sprintf("Make %s like %s", on, other)
+		s = styleBold.Render("⇄") + fmt.Sprintf(" Make %s like %s", on, other)
 		counts := map[string]int{}
 		for _, a := range c.acts {
 			counts[a.Verb]++
@@ -472,15 +472,15 @@ func (v *view) choiceLabel(c choice) string {
 		}
 		return s
 	case c.verb == fix.Install:
-		s = "Install on " + on
+		s = icon(c.verb) + " Install on " + on
 	case c.verb == fix.Update:
-		s = fmt.Sprintf("Update on %s to %s's version", on, other)
+		s = icon(c.verb) + fmt.Sprintf(" Update on %s to %s's version", on, other)
 	case c.verb == fix.Set:
-		s = fmt.Sprintf("Set on %s as on %s", on, other)
+		s = icon(c.verb) + fmt.Sprintf(" Set on %s as on %s", on, other)
 	case c.verb == fix.Remove:
-		s = "Remove from " + on
+		s = icon(c.verb) + " Remove from " + on
 	case c.verb == fix.Reset:
-		s = "Reset to the default on " + on
+		s = icon(c.verb) + " Reset to the default on " + on
 	}
 	if total := len(c.acts) + len(c.notes); total > 1 {
 		if len(c.notes) > 0 {
@@ -494,6 +494,24 @@ func (v *view) choiceLabel(c choice) string {
 
 func verbTitle(verb string) string {
 	return map[string]string{fix.Install: "Install", fix.Update: "Update", fix.Set: "Set", fix.Remove: "Remove", fix.Reset: "Reset"}[verb]
+}
+
+// icon marks what an action does, in the same colours the rest of the view
+// uses: green adds, blue changes, red deletes.
+func icon(verb string) string {
+	switch verb {
+	case fix.Install:
+		return styleOK.Render("✚")
+	case fix.Update:
+		return styleB.Render("↑")
+	case fix.Set:
+		return styleCh.Render("✎")
+	case fix.Remove:
+		return styleBad.Render("✗")
+	case fix.Reset:
+		return styleCh.Render("↺")
+	}
+	return " "
 }
 
 func (v *view) openConfirm(c choice) {
@@ -513,7 +531,7 @@ func (v *view) openConfirm(c choice) {
 	prev := ""
 	for i, a := range c.acts {
 		if a.Verb != prev {
-			lines = append(lines, verbTitle(a.Verb))
+			lines = append(lines, icon(a.Verb)+" "+verbTitle(a.Verb))
 			prev = a.Verb
 		}
 		lines = append(lines, fmt.Sprintf("  %3d  %s", i+1, a.Command()))
@@ -995,10 +1013,8 @@ func (v *view) render() string {
 				l = styleB.Render(l)
 			case strings.HasPrefix(l, "@@"), strings.HasPrefix(l, "#"):
 				l = styleDim.Render(l)
-			case strings.HasPrefix(l, "Remove"):
+			case strings.HasPrefix(l, "Remove:"):
 				l = styleBad.Render(l)
-			case v.confirm != nil && v.confirmed == nil && (l == "Install" || l == "Update" || l == "Set" || l == "Reset"):
-				l = styleBold.Render(l)
 			}
 			b.WriteString(truncate(l, w) + "\n")
 		}
