@@ -50,8 +50,10 @@ type Side struct {
 	// Remote is true when commands reach the machine over ssh.
 	Remote bool
 	// Dest is the ssh destination of a remote machine, for the commands
-	// that have to name it (copying a file between the two).
-	Dest string
+	// that have to name it (copying a file between the two), and SSHOpts
+	// the options that reuse the run's shared connection.
+	Dest    string
+	SSHOpts []string
 	// NoInstall says why nothing can change there (a snapshot file).
 	NoInstall string
 	// Prepare turns an installer script into the run that carries it out on
@@ -113,7 +115,9 @@ type Start struct {
 
 // Run runs the interactive mode until the user quits.
 func Run(b Backend, st Start) error {
-	_, err := tea.NewProgram(newApp(b, st), tea.WithAltScreen()).Run()
+	// hostdiff handles signals itself: Ctrl-C during an installer or an ssh
+	// password prompt belongs to that command, not to the view.
+	_, err := tea.NewProgram(newApp(b, st), tea.WithAltScreen(), tea.WithoutSignalHandler()).Run()
 	return err
 }
 
@@ -175,6 +179,7 @@ type App struct {
 	kinds   []string
 	gen     int
 	ch      chan tea.Msg
+	cancel  chan struct{} // closed when the current scan is abandoned
 	state   [2]map[string]*sectionState
 	stage   [2]string
 	done    [2]bool
@@ -296,26 +301,45 @@ func (a *App) startScan() tea.Cmd {
 	if len(a.kinds) == 0 {
 		a.kinds = a.allKinds()
 	}
+	a.abandon()
 	a.gen++
 	gen := a.gen
 	a.screen, a.note = screenScan, ""
 	a.ch = make(chan tea.Msg, 512)
+	a.cancel = make(chan struct{})
 	for side := 0; side < 2; side++ {
 		a.state[side] = map[string]*sectionState{}
 		a.done[side], a.errs[side], a.stage[side] = false, nil, ""
 	}
 	a.started = time.Now()
-	ch, kinds, b := a.ch, a.kinds, a.b
+	ch, kinds, b, cancel := a.ch, a.kinds, a.b, a.cancel
+	// Sends give up once the scan is abandoned, so a collector never blocks
+	// on a channel nobody reads any more.
+	send := func(msg tea.Msg) {
+		select {
+		case ch <- msg:
+		case <-cancel:
+		}
+	}
 	for side := 0; side < 2; side++ {
 		go func() {
-			err := b.Collect(side, kinds, func(p snapshot.Progress) { ch <- progressMsg{gen: gen, side: side, p: p} })
-			ch <- collectedMsg{gen: gen, side: side, err: err}
+			err := b.Collect(side, kinds, func(p snapshot.Progress) { send(progressMsg{gen: gen, side: side, p: p}) })
+			send(collectedMsg{gen: gen, side: side, err: err})
 		}()
 	}
 	return tea.Batch(listen(ch), tick(gen))
 }
 
 func listen(ch chan tea.Msg) tea.Cmd { return func() tea.Msg { return <-ch } }
+
+// abandon lets the running scan's collectors finish without anyone waiting
+// for them; the backend discards what they bring if the machines changed.
+func (a *App) abandon() {
+	if a.cancel != nil {
+		close(a.cancel)
+		a.cancel = nil
+	}
+}
 
 func tick(gen int) tea.Cmd {
 	return tea.Tick(120*time.Millisecond, func(time.Time) tea.Msg { return tickMsg{gen} })
@@ -436,6 +460,7 @@ func (a *App) key(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return a, tea.Quit
 		case "esc":
 			// Leave the scan or check; what it still finishes is ignored.
+			a.abandon()
 			a.gen++
 			if !a.pick {
 				return a, tea.Quit

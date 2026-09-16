@@ -11,12 +11,15 @@ import (
 	"io/fs"
 	"os"
 	"os/exec"
+	"os/signal"
 	"os/user"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/mattn/go-isatty"
@@ -38,6 +41,7 @@ var Version = "0.1.0-dev"
 var errDifferent = errors.New("differences found")
 
 func main() {
+	handleSignals()
 	err := run(os.Args[1:], os.Stdout, os.Stderr)
 	// Shared ssh connections are closed before leaving, whatever happened.
 	remote.CloseControl()
@@ -341,6 +345,12 @@ type session struct {
 	mu      sync.Mutex
 	targets [2]*target
 	snaps   [2]*snapshot.Snapshot
+	// seq numbers the collections of each side; only the newest one may
+	// write its result, so an abandoned scan can never overwrite what a
+	// later one (or another machine) collected.
+	seq [2]int
+	// collectFn replaces target.collect in tests.
+	collectFn func(t *target, kinds []string, progress func(snapshot.Progress)) (*snapshot.Snapshot, error)
 }
 
 func newSession(cfg *config.Config, skip []string) *session {
@@ -390,10 +400,10 @@ func (s *session) Select(a, b string) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.targets[0] == nil || s.targets[0].label != ta.label || s.targets[1].label != tb.label {
-		s.snaps = [2]*snapshot.Snapshot{{Format: snapshot.Format}, {Format: snapshot.Format}}
-	}
+	s.snaps = [2]*snapshot.Snapshot{{Format: snapshot.Format}, {Format: snapshot.Format}}
 	s.targets = [2]*target{ta, tb}
+	s.seq[0]++
+	s.seq[1]++
 	return nil
 }
 
@@ -406,13 +416,25 @@ func (s *session) Labels() [2]string {
 func (s *session) Collect(side int, kinds []string, progress func(snapshot.Progress)) error {
 	s.mu.Lock()
 	t := s.targets[side]
+	s.seq[side]++
+	seq := s.seq[side]
+	collectFn := s.collectFn
 	s.mu.Unlock()
-	fresh, err := t.collect(s.cfg, collectOpts{only: kinds, skip: s.skip, onProgress: progress})
+	var fresh *snapshot.Snapshot
+	var err error
+	if collectFn != nil {
+		fresh, err = collectFn(t, kinds, progress)
+	} else {
+		fresh, err = t.collect(s.cfg, collectOpts{only: kinds, skip: s.skip, onProgress: progress})
+	}
 	if err != nil {
 		return err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.seq[side] != seq || s.targets[side] != t {
+		return errors.New("discarded: a newer scan or another machine was chosen meanwhile")
+	}
 	merged := *fresh
 	merged.Sections = replaceSections(s.snaps[side].Sections, fresh.Sections)
 	s.snaps[side] = &merged
@@ -448,7 +470,7 @@ func (s *session) Connect(side int) (*tui.Started, error) {
 	if t == nil || t.machine == nil {
 		return nil, errors.New("this side is not reached over ssh")
 	}
-	return &tui.Started{Cmd: remote.ConnectCommand(t.machine, remote.Options{}), Cleanup: func() {}}, nil
+	return running(&tui.Started{Cmd: remote.ConnectCommand(t.machine, remote.Options{}), Cleanup: func() {}}), nil
 }
 
 func (s *session) Side(side int) tui.Side {
@@ -486,12 +508,12 @@ func (t *target) installSide(tty bool) tui.Side {
 		return tui.Side{Where: "snapshot file", NoInstall: "it is a snapshot file, not a live machine"}
 	case t.machine != nil:
 		m := t.machine
-		return tui.Side{Where: "ssh " + m.SSH, Remote: true, Dest: m.SSH, Prepare: func(script string) (*tui.Started, error) {
-			cmd, results, err := remote.InstallCommand(m, script, tty)
+		return tui.Side{Where: "ssh " + m.SSH, Remote: true, Dest: m.SSH, SSHOpts: remote.SSHOptions(), Prepare: func(script string) (*tui.Started, error) {
+			in, err := remote.InstallCommand(m, script, tty)
 			if err != nil {
 				return nil, err
 			}
-			return &tui.Started{Cmd: cmd, Results: results, Cleanup: func() {}}, nil
+			return running(&tui.Started{Cmd: in.Cmd, Results: in.Results, Cleanup: in.Cleanup}), nil
 		}}
 	}
 	return tui.Side{Where: "this machine", Prepare: localInstaller}
@@ -510,16 +532,57 @@ func localInstaller(script string) (*tui.Started, error) {
 		return nil, err
 	}
 	results := filepath.Join(dir, "results")
+	if err := os.WriteFile(results, nil, 0o600); err != nil {
+		os.RemoveAll(dir)
+		return nil, err
+	}
 	cmd := exec.Command("/bin/sh", p)
 	cmd.Env = append(os.Environ(), "PATH="+collect.Current().Path, "HOSTDIFF_RESULTS="+results)
-	return &tui.Started{
+	return running(&tui.Started{
 		Cmd: cmd,
 		Results: func() (map[int]int, error) {
 			b, err := os.ReadFile(results)
 			return remote.ParseResults(string(b)), err
 		},
 		Cleanup: func() { os.RemoveAll(dir) },
-	}, nil
+	}), nil
+}
+
+// busy counts commands that own the terminal right now (an installer, ssh
+// asking for a password). Ctrl-C then belongs to them: hostdiff must stay
+// alive to clean up and report.
+var busy atomic.Int32
+
+// running marks a prepared run as owning the terminal until its cleanup.
+func running(s *tui.Started) *tui.Started {
+	busy.Add(1)
+	cleanup := s.Cleanup
+	var once sync.Once
+	s.Cleanup = func() {
+		once.Do(func() {
+			if cleanup != nil {
+				cleanup()
+			}
+			busy.Add(-1)
+		})
+	}
+	return s
+}
+
+// handleSignals closes shared ssh connections before hostdiff is ended by a
+// signal, and leaves Ctrl-C to a command that owns the terminal.
+func handleSignals() {
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+	go func() {
+		for sig := range sigs {
+			if sig == os.Interrupt && busy.Load() > 0 {
+				continue
+			}
+			remote.CloseControl()
+			os.Exit(130)
+		}
+	}()
 }
 
 // installCLI prints what would be installed on one side, asks, runs it in

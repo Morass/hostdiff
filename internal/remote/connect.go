@@ -56,6 +56,10 @@ func controlArgs() []string {
 	}
 }
 
+// SSHOptions are the options that reuse this run's shared connection, for
+// commands hostdiff builds itself (copying a file over ssh).
+func SSHOptions() []string { return controlArgs() }
+
 // CloseControl ends the shared connections and removes their sockets.
 func CloseControl() {
 	if controlDir == "" {

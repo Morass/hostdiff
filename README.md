@@ -154,10 +154,10 @@ status. That summary stays until the next run.
 
 **Clone.** `C` offers "Make air like mini" (or the other way round) for the
 groups you compared: installs, updates and removals in one run, removals last.
-If anything would be removed you have to type `yes`.
+If anything would be removed or reset you have to type `yes`.
 
 **What can be changed:** Homebrew formulae, casks and taps (an update installs
-the newest version), App Store apps (`mas`), npm, pnpm, pipx, uv, cargo, gh
+Homebrew's newest version), App Store apps (`mas`), npm, pnpm, pipx, uv, cargo, gh
 and dotnet global tools, VS Code, Cursor and VSCodium extensions, pip `--user`
 packages per Python version, gems, CPAN modules, Composer, LuaRocks and Dart
 packages (R and Julia: install and remove), versions from pyenv, rbenv,
@@ -166,13 +166,21 @@ rustup, asdf, mise and uv, and simple macOS settings (`defaults write` and
 
 **Files that only exist as files** — your own fonts — are copied between the
 machines instead: hostdiff pipes the file over the same ssh connection, in
-either direction, and can delete one from either machine. Fonts installed for
+either direction, into the other system's font folder (written to a
+temporary name, then renamed), and can delete one from either machine. Links
+are never followed. Fonts installed for
 all users are only reported, because changing them needs an administrator.
 
 **What is only reported:** packages installed system-wide for an interpreter,
 apps without a Homebrew cask, launch agents, and dotfiles — hostdiff never
 copies a dotfile, because snapshots hold them with secrets redacted.
-Nothing is ever downgraded, and nothing is removed unless you chose a removal.
+
+"Update" means "install the other machine's version", and the menu shows
+both (`25.1.0 → 26.8.1`); when the other machine has the older version, that
+is a downgrade. Nothing is removed unless you chose a removal or a clone, and a
+clone only removes a kind of item (casks, gems, …) when the other machine
+lists at least one of that kind, since an empty list can also mean it could
+not be read.
 
 ## The other machine
 

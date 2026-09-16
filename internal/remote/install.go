@@ -2,7 +2,6 @@ package remote
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os/exec"
 	"regexp"
@@ -15,48 +14,65 @@ import (
 
 var tmpPathRe = regexp.MustCompile(`^/[A-Za-z0-9._/+-]{1,400}$`)
 
+// Install is a prepared run on another machine.
+type Install struct {
+	// Cmd runs the script there in this terminal.
+	Cmd *exec.Cmd
+	// Results reads back the exit status of each step.
+	Results func() (map[int]int, error)
+	// Cleanup removes the script and its results from the other machine;
+	// call it once, whatever happened.
+	Cleanup func()
+}
+
 // InstallCommand copies an installer script to m and returns the ssh command
 // that runs it there. With tty set the session gets a terminal, so password
 // prompts (sudo, a cask's installer) work and Ctrl-C reaches the steps. The
-// script is sent over a plain connection first: the command line that runs
-// it only carries a path hostdiff has checked, and the file removes itself.
-func InstallCommand(m *config.Machine, script string, tty bool) (*exec.Cmd, func() (map[int]int, error), error) {
+// script and its results file are created inside one private temporary
+// folder (mktemp -d, mode 700) over a plain connection first: nobody else
+// can create or replace them, and the command line that runs the script
+// only carries a path hostdiff has checked.
+func InstallCommand(m *config.Machine, script string, tty bool) (*Install, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	opt := Options{}
-	out, errOut, code, err := run(ctx, opt, m.SSH, `umask 077; f=$(mktemp "${TMPDIR:-/tmp}/hostdiff-install.XXXXXX") && cat > "$f" && echo "$f"`, []byte(script))
+	out, errOut, code, err := run(ctx, opt, m.SSH, `umask 077; d=$(mktemp -d "${TMPDIR:-/tmp}/hostdiff-install.XXXXXX") && cat > "$d/install.sh" && : > "$d/results" && echo "$d"`, []byte(script))
 	if err != nil {
-		return nil, nil, fmt.Errorf("%s: ssh: %w", m.Name, err)
+		return nil, fmt.Errorf("%s: ssh: %w", m.Name, err)
 	}
 	if code != 0 {
-		return nil, nil, fmt.Errorf("%s: %s", m.Name, failure(code, errOut))
+		return nil, fmt.Errorf("%s: %s", m.Name, failure(code, errOut))
 	}
-	path := strings.TrimSpace(string(out))
-	if !tmpPathRe.MatchString(path) {
-		return nil, nil, fmt.Errorf("%s: unexpected temporary file name from the remote side", m.Name)
+	dir := strings.TrimSpace(string(out))
+	if !tmpPathRe.MatchString(dir) {
+		return nil, fmt.Errorf("%s: unexpected temporary folder name from the remote side", m.Name)
+	}
+	remoteRun := func(script string) ([]byte, []byte, int, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		return run(ctx, opt, m.SSH, script, nil)
 	}
 	flag := "-T"
 	if tty {
 		flag = "-t"
 	}
-	wrapper := `trap "rm -f ` + path + `" EXIT; trap "exit 130" INT; trap "exit 129" HUP; HOSTDIFF_RESULTS=` + path + `.results /bin/sh ` + path
+	wrapper := `trap "exit 130" INT; trap "exit 129" HUP; HOSTDIFF_RESULTS=` + dir + `/results /bin/sh ` + dir + `/install.sh`
 	args := append([]string{"-o", "ConnectTimeout=15"}, controlArgs()...)
 	args = append(args, flag, "--", m.SSH, "/bin/sh -c '"+wrapper+"'")
-	cmd := exec.Command(sshProgram(opt), args...)
-	// What each step did is read back afterwards, then removed.
-	results := func() (map[int]int, error) {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		out, errOut, code, err := run(ctx, opt, m.SSH, `cat `+path+`.results 2>/dev/null; rm -f `+path+`.results`, nil)
-		if err != nil {
-			return nil, err
-		}
-		if code != 0 {
-			return nil, errors.New(failure(code, errOut))
-		}
-		return ParseResults(string(out)), nil
-	}
-	return cmd, results, nil
+	return &Install{
+		Cmd: exec.Command(sshProgram(opt), args...),
+		Results: func() (map[int]int, error) {
+			out, errOut, code, err := remoteRun(`cat ` + dir + `/results`)
+			if err != nil {
+				return nil, err
+			}
+			if code != 0 {
+				return nil, fmt.Errorf("could not read the results: %s", failure(code, errOut))
+			}
+			return ParseResults(string(out)), nil
+		},
+		Cleanup: func() { remoteRun(`rm -rf ` + dir) },
+	}, nil
 }
 
 // ParseResults reads the "STEP EXITCODE" lines an installer script writes.

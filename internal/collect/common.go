@@ -125,17 +125,27 @@ func brew(e *Env, s *snapshot.Section) {
 		}
 		s.AddTag("formula › "+f[0], strings.Join(f[1:], " "), detail)
 	}
+	// A part that could not be listed is said out loud: an empty list would
+	// read as "none installed".
+	var failed []string
 	if casks, err := e.Out("brew", "list", "--cask", "--versions"); err == nil {
 		for _, l := range Lines(casks) {
 			if f := strings.Fields(l); len(f) >= 2 {
 				s.Add("cask › "+f[0], strings.Join(f[1:], " "), "")
 			}
 		}
+	} else {
+		failed = append(failed, "casks ("+err.Error()+")")
 	}
 	if taps, err := e.Out("brew", "tap"); err == nil {
 		for _, l := range Lines(taps) {
 			s.Add("tap › "+l, "tapped", "")
 		}
+	} else {
+		failed = append(failed, "taps ("+err.Error()+")")
+	}
+	if len(failed) > 0 {
+		s.Note = "could not list " + strings.Join(failed, ", ")
 	}
 }
 
@@ -707,12 +717,17 @@ func fonts(e *Env, s *snapshot.Section) {
 			if de.IsDir() && strings.Count(strings.TrimPrefix(p, d.dir), string(os.PathSeparator)) > 2 {
 				return filepath.SkipDir
 			}
-			if !de.IsDir() && fontExt[strings.ToLower(filepath.Ext(p))] {
-				// The path inside the folder is a tag: it is not compared
-				// (the same font in another subfolder is the same font) but
-				// it is what a copy needs.
-				rel := strings.TrimPrefix(strings.TrimPrefix(p, d.dir), string(os.PathSeparator))
-				s.AddTag(de.Name(), d.label, rel)
+			// Regular files only: a link in a fonts folder can point anywhere,
+			// and a copy or removal must never follow it.
+			if de.Type().IsRegular() && fontExt[strings.ToLower(filepath.Ext(p))] {
+				// The path inside the home folder is a tag: not compared (the
+				// same font in another subfolder is the same font), but it is
+				// what a copy or a removal acts on.
+				tag := ""
+				if rel, err := filepath.Rel(e.Home, p); err == nil && d.label == "user" && !strings.HasPrefix(rel, "..") {
+					tag = filepath.ToSlash(rel)
+				}
+				s.AddTag(de.Name(), d.label, tag)
 			}
 			return nil
 		})

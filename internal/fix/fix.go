@@ -17,7 +17,13 @@ import (
 )
 
 var (
-	pkgRe       = regexp.MustCompile(`^[A-Za-z0-9@][A-Za-z0-9@._+/:-]{0,200}$`)
+	// Names only: no ":" (npm file:, git+https:), no ".." segments. Some
+	// ecosystems read other shapes as a location, so they get their own.
+	pkgRe       = regexp.MustCompile(`^[A-Za-z0-9@][A-Za-z0-9@._+/-]{0,200}$`)
+	npmRe       = regexp.MustCompile(`^(@[A-Za-z0-9][A-Za-z0-9._~-]*/)?[A-Za-z0-9][A-Za-z0-9._~-]{0,200}$`)
+	pypiRe      = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,200}$`)
+	cargoRe     = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,100}$`)
+	juliaEnvRe  = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,40}$`)
 	digitsRe    = regexp.MustCompile(`^[0-9]{1,15}$`)
 	domainRe    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,200}$`)
 	defKeyRe    = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9._ -]{0,200}$`)
@@ -87,6 +93,25 @@ func comment(s string) string {
 	return s
 }
 
+// nameRe is the shape a package name must have for the tool behind prefix,
+// so that nothing but a registry name reaches it.
+func nameRe(prefix string) *regexp.Regexp {
+	switch strings.TrimSuffix(prefix, " › ") {
+	case "npm", "pnpm":
+		return npmRe
+	case "pipx", "uv":
+		return pypiRe
+	case "cargo":
+		return cargoRe
+	}
+	return pkgRe
+}
+
+// validName checks a name against re and refuses path-like tricks.
+func validName(re *regexp.Regexp, n string) bool {
+	return re.MatchString(n) && !strings.Contains(n, "..") && !strings.HasSuffix(n, "/") && !strings.Contains(n, "//")
+}
+
 func run(kind, key string, argv ...string) Action {
 	return Action{Kind: kind, Key: key, Argv: argv}
 }
@@ -110,7 +135,7 @@ func ForMissing(kind string, it snapshot.Item) (a Action, ok bool) {
 		if !ok {
 			return Action{}, false
 		}
-		if !pkgRe.MatchString(n) {
+		if !validName(nameRe(prefix), n) {
 			return skipped(kind, key, "unusual characters"), true
 		}
 		return run(kind, key, append(cmd, n)...), true
@@ -173,53 +198,84 @@ func firstOS(s []string) string {
 	return s[0]
 }
 
-func fontDir(os string) string {
-	if os == "darwin" {
-		return "Library/Fonts"
-	}
-	return ".local/share/fonts"
+// fontRoots are the folders, inside the home folder, that hold a user's
+// fonts; the first is where a copied font goes.
+var fontRoots = map[string][]string{
+	"darwin": {"Library/Fonts"},
+	"linux":  {".local/share/fonts", ".fonts"},
 }
 
-// fontPath is the shell text for a font file inside the home folder, or
-// false when the name holds something a shell would read as code.
-var fontNameRe = regexp.MustCompile(`^[^"'` + "`" + `$\\\x00-\x1f]{1,150}$`)
+// fontNameRe refuses everything a double-quoted shell word would still read
+// as code: quotes, $, backquote, backslash and control characters.
+var fontNameRe = regexp.MustCompile(`^[^"'` + "`" + `$\\\x00-\x1f]{1,300}$`)
 
-func fontPath(osName, rel string) (string, bool) {
-	if !fontNameRe.MatchString(rel) || strings.Contains(rel, "..") {
-		return "", false
+// fontInside splits a home-relative font path into its root folder and the
+// part inside it, or false when it is not in a user font folder.
+func fontInside(osName, homeRel string) (root, rel string, ok bool) {
+	if !fontNameRe.MatchString(homeRel) || strings.Contains(homeRel, "..") || strings.HasPrefix(homeRel, "/") {
+		return "", "", false
 	}
-	return `"$HOME/` + fontDir(osName) + "/" + rel + `"`, true
+	for os, roots := range fontRoots {
+		if osName != "" && os != osName {
+			continue
+		}
+		for _, r := range roots {
+			if in, found := strings.CutPrefix(homeRel, r+"/"); found && in != "" {
+				return r, in, true
+			}
+		}
+	}
+	return "", "", false
 }
 
-// ForCopy returns the command that copies a font the other machine has (or
-// lacks) between the two, run on the machine that has ssh: the local one.
-// dest is the ssh destination of the other machine, toRemote says which way
-// the file goes, and the two OS names say where fonts live on each side.
-func ForCopy(kind string, it snapshot.Item, localOS, remoteOS, dest string, toRemote bool) (a Action, ok bool) {
+func quoted(homeRel string) string { return `"$HOME/` + homeRel + `"` }
+
+func parent(homeRel string) string {
+	if i := strings.LastIndex(homeRel, "/"); i > 0 {
+		return homeRel[:i]
+	}
+	return homeRel
+}
+
+// ForCopy returns the command that copies a user font between this machine
+// and one reached over ssh; it runs here. from and to are the home-relative
+// paths: the font where it is, and where it goes on the other side (the
+// same place inside that system's font folder). sshOpts are the options of
+// the run's shared connection. The file is written to a temporary name and
+// renamed, so a link at the destination is replaced, never followed, and a
+// failed transfer leaves nothing half written.
+func ForCopy(kind string, it snapshot.Item, localOS, remoteOS, dest string, sshOpts []string, toRemote bool) (a Action, ok bool) {
 	defer func() { a.Verb = Copy }()
 	if kind != "fonts" || dest == "" {
 		return Action{}, false
 	}
 	if it.Value != "user" {
-		return note(kind, it.Key, "a system font: copy it yourself, it needs an administrator"), true
+		return note(kind, it.Key, "a font for all users: copy it yourself, it needs an administrator"), true
 	}
-	rel := it.Tag
-	if rel == "" {
-		rel = it.Key
+	srcOS, dstOS := localOS, remoteOS
+	if !toRemote {
+		srcOS, dstOS = remoteOS, localOS
 	}
-	local, ok1 := fontPath(localOS, rel)
-	remote, ok2 := fontPath(remoteOS, rel)
-	if !ok1 || !ok2 {
-		return skipped(kind, it.Key, "the file name holds characters a shell would read as code"), true
+	_, rel, found := fontInside(srcOS, it.Tag)
+	if !found || len(fontRoots[dstOS]) == 0 {
+		return skipped(kind, it.Key, "not a font file in a user font folder, or a name a shell would read as code"), true
 	}
-	remoteDir := `"$HOME/` + fontDir(remoteOS) + `"`
-	localDir := `"$HOME/` + fontDir(localOS) + `"`
+	src := it.Tag
+	dst := fontRoots[dstOS][0] + "/" + rel
+	tmp := dst + ".hostdiff-part"
+	ssh := "ssh"
+	for _, o := range sshOpts {
+		ssh += " " + Quote(o)
+	}
+	ssh += " -- " + Quote(dest)
+	check := "test -f " + quoted(src) + " && test ! -L " + quoted(src)
 	if toRemote {
-		return run(kind, it.Key, "/bin/sh", "-c",
-			"ssh -- "+dest+" 'mkdir -p "+remoteDir+" && cat > "+remote+"' < "+local), true
+		remote := "mkdir -p " + quoted(parent(dst)) + " && cat > " + quoted(tmp) + " && mv -f " + quoted(tmp) + " " + quoted(dst)
+		return run(kind, it.Key, "/bin/sh", "-c", check+" && "+ssh+" "+Quote(remote)+" < "+quoted(src)), true
 	}
 	return run(kind, it.Key, "/bin/sh", "-c",
-		"mkdir -p "+localDir+" && ssh -- "+dest+" 'cat "+remote+"' > "+local), true
+		"mkdir -p "+quoted(parent(dst))+" && "+ssh+" "+Quote(check+" && cat "+quoted(src))+" > "+quoted(tmp)+
+			" && mv -f "+quoted(tmp)+" "+quoted(dst)+" || { rm -f "+quoted(tmp)+"; exit 1; }"), true
 }
 
 // ForChange returns what makes the machine that has c's "have" side match
@@ -260,7 +316,7 @@ func ForRemove(kind string, it snapshot.Item, osName ...string) (a Action, ok bo
 		if !ok {
 			return Action{}, false
 		}
-		if !pkgRe.MatchString(n) {
+		if !validName(nameRe(prefix), n) {
 			return skipped(kind, key, "unusual characters"), true
 		}
 		return run(kind, key, append(cmd, n)...), true
@@ -319,18 +375,14 @@ func ForRemove(kind string, it snapshot.Item, osName ...string) (a Action, ok bo
 		return note(kind, key, "move the app to the Trash yourself (or remove its cask under Homebrew)"), true
 	case "fonts":
 		if it.Value != "user" {
-			return note(kind, key, "a system font: remove it yourself, it needs an administrator"), true
+			return note(kind, key, "a font for all users: remove it yourself, it needs an administrator"), true
 		}
-		rel := it.Tag
-		if rel == "" {
-			rel = key
+		// The tag is where the font is on the machine that has it.
+		if _, _, found := fontInside(firstOS(osName), it.Tag); !found {
+			return skipped(kind, key, "not a font file in a user font folder, or a name a shell would read as code"), true
 		}
-		// The machine this runs on is the one that has the font.
-		p, ok := fontPath(firstOS(osName), rel)
-		if !ok {
-			return skipped(kind, key, "the file name holds characters a shell would read as code"), true
-		}
-		return run(kind, key, "/bin/sh", "-c", "rm -f "+p), true
+		p := quoted(it.Tag)
+		return run(kind, key, "/bin/sh", "-c", "test ! -L "+p+" && rm -f "+p), true
 	}
 	return Action{}, false
 }
@@ -346,7 +398,7 @@ func ForUpdate(kind, key, want, wantTag, have, haveTag string) (a Action, ok boo
 		v = ""
 	}
 	pinned := func(cmd ...string) (Action, bool) {
-		if !pkgRe.MatchString(name) {
+		if !validName(nameRe(label), name) {
 			return skipped(kind, key, "unusual characters"), true
 		}
 		if v == "" {
@@ -429,6 +481,13 @@ func ForUpdate(kind, key, want, wantTag, have, haveTag string) (a Action, ok boo
 // then updates and settings, removals last.
 func Clone(r *diff.Result, onA bool) []Action {
 	var installs, updates, removals []Action
+	targetOS := ""
+	if snap := r.B.Snap; !onA && snap != nil {
+		targetOS = snap.Host.OS
+	}
+	if snap := r.A.Snap; onA && snap != nil {
+		targetOS = snap.Host.OS
+	}
 	for i := range r.Sections {
 		s := &r.Sections[i]
 		if !s.Comparable {
@@ -455,12 +514,28 @@ func Clone(r *diff.Result, onA bool) []Action {
 				updates = append(updates, a)
 			}
 		}
+		// Only remove what the source could have had: when the source lists
+		// nothing at all of a kind (no casks, no gems), that is as likely a
+		// listing that failed or a tool that is missing there as a choice.
+		sourceHas := map[string]bool{}
+		for _, list := range [][]snapshot.Item{s.Same, missing} {
+			for _, it := range list {
+				sourceHas[partOf(it.Key)] = true
+			}
+		}
+		for _, c := range s.Changed {
+			sourceHas[partOf(c.Key)] = true
+		}
 		var out []Action
 		for _, it := range extra {
 			if s.Kind == "brew" && it.Tag == "dependency" {
 				continue // leaves with whatever needed it
 			}
-			if a, ok := ForRemove(s.Kind, it); ok {
+			if !sourceHas[partOf(it.Key)] {
+				out = append(out, note(s.Kind, it.Key, "not removed: the other machine lists nothing of this kind, which may mean its list could not be read"))
+				continue
+			}
+			if a, ok := ForRemove(s.Kind, it, targetOS); ok {
 				out = append(out, a)
 			}
 		}
@@ -469,6 +544,15 @@ func Clone(r *diff.Result, onA bool) []Action {
 		removals = append(removals, out...)
 	}
 	return append(append(installs, updates...), removals...)
+}
+
+// partOf is the part of a section a key belongs to: "cask" for
+// "cask › rectangle", "" for keys without one.
+func partOf(key string) string {
+	if p, _, ok := strings.Cut(key, " › "); ok {
+		return p
+	}
+	return ""
 }
 
 func removeLibrary(key, tag string) (Action, bool) {
@@ -488,12 +572,12 @@ func removeLibrary(key, tag string) (Action, bool) {
 		if tag != "user" {
 			return note(kind, key, "installed system-wide; remove it the way that %s is managed", label), true
 		}
-		return valid(pkgRe, label, "-m", "pip", "uninstall", "--yes", name)
+		return valid(pypiRe, label, "-m", "pip", "uninstall", "--yes", name)
 	case label == "gem":
 		if tag == "default" {
 			return note(kind, key, "ships with Ruby"), true
 		}
-		return valid(pkgRe, "gem", "uninstall", "--all", "--executables", name)
+		return valid(pypiRe, "gem", "uninstall", "--all", "--executables", name)
 	case label == "perl":
 		return valid(perlNameRe, "cpanm", "--uninstall", "--force", name)
 	case label == "composer":
@@ -501,7 +585,11 @@ func removeLibrary(key, tag string) (Action, bool) {
 	case label == "R":
 		return valid(rNameRe, "Rscript", "-e", "remove.packages('"+name+"')")
 	case strings.HasPrefix(label, "julia "):
-		return valid(juliaNameRe, "julia", "-e", `using Pkg; Pkg.rm("`+name+`")`)
+		env := strings.TrimPrefix(label, "julia ")
+		if !juliaEnvRe.MatchString(env) {
+			return skipped(kind, key, "unusual environment name"), true
+		}
+		return valid(juliaNameRe, "julia", "--project=@"+env, "-e", `using Pkg; Pkg.rm("`+name+`")`)
 	case label == "luarocks":
 		return valid(pkgRe, "luarocks", "remove", name)
 	case label == "dart":
@@ -574,7 +662,7 @@ func installLibrary(key, tag string) (Action, bool) {
 	}
 	switch {
 	case pyLabelRe.MatchString(label):
-		if !pkgRe.MatchString(name) {
+		if !validName(pypiRe, name) {
 			return skipped(kind, key, "unusual characters"), true
 		}
 		if tag != "user" {
@@ -585,7 +673,7 @@ func installLibrary(key, tag string) (Action, bool) {
 		if tag == "default" {
 			return note(kind, key, "ships with Ruby"), true
 		}
-		return valid(pkgRe, "gem", "install", name)
+		return valid(pypiRe, "gem", "install", name)
 	case label == "perl":
 		return valid(perlNameRe, "cpanm", name)
 	case label == "composer":
@@ -593,7 +681,11 @@ func installLibrary(key, tag string) (Action, bool) {
 	case label == "R":
 		return valid(rNameRe, "Rscript", "-e", "install.packages('"+name+"', repos = 'https://cloud.r-project.org')")
 	case strings.HasPrefix(label, "julia "):
-		return valid(juliaNameRe, "julia", "-e", `using Pkg; Pkg.add("`+name+`")`)
+		env := strings.TrimPrefix(label, "julia ")
+		if !juliaEnvRe.MatchString(env) {
+			return skipped(kind, key, "unusual environment name"), true
+		}
+		return valid(juliaNameRe, "julia", "--project=@"+env, "-e", `using Pkg; Pkg.add("`+name+`")`)
 	case label == "luarocks":
 		return valid(pkgRe, "luarocks", "install", name)
 	case label == "dart":

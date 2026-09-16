@@ -55,7 +55,15 @@ type progressWriter struct {
 }
 
 func (w *progressWriter) Write(p []byte) (int, error) {
+	// Error text is only ever shown in part; keep memory bounded.
+	if w.buf.Len() > 1<<20 {
+		w.buf.Reset()
+		w.buf.WriteString("…\n")
+	}
 	w.pending = append(w.pending, p...)
+	if len(w.pending) > 1<<20 {
+		w.pending = w.pending[len(w.pending)-1<<16:]
+	}
 	for {
 		i := bytes.IndexByte(w.pending, '\n')
 		if i < 0 {
@@ -151,9 +159,9 @@ func run(ctx context.Context, opt Options, dest, script string, stdin []byte) (s
 	args := append([]string{"-o", "ConnectTimeout=15"}, controlArgs()...)
 	args = append(args, "-T", "--", dest, "/bin/sh -c '"+script+"'")
 	cmd := exec.CommandContext(ctx, sshProgram(opt), args...)
-	var out bytes.Buffer
+	out := &limitedBuffer{max: snapshot.MaxBytes}
 	errb := &progressWriter{fn: opt.Progress}
-	cmd.Stdout, cmd.Stderr = &out, errb
+	cmd.Stdout, cmd.Stderr = out, errb
 	if stdin != nil {
 		cmd.Stdin = bytes.NewReader(stdin)
 	}
@@ -166,7 +174,26 @@ func run(ctx context.Context, opt Options, dest, script string, stdin []byte) (s
 	if ctx.Err() == context.DeadlineExceeded {
 		err = fmt.Errorf("timed out after %s", opt.Timeout)
 	}
-	return out.Bytes(), errb.bytes(), code, err
+	if out.over && err == nil {
+		err = fmt.Errorf("the other machine sent more than %d MB", snapshot.MaxBytes>>20)
+	}
+	return out.buf.Bytes(), errb.bytes(), code, err
+}
+
+// limitedBuffer stops accepting output past max bytes, which ends the ssh
+// command with a broken pipe instead of filling memory.
+type limitedBuffer struct {
+	buf  bytes.Buffer
+	max  int
+	over bool
+}
+
+func (l *limitedBuffer) Write(p []byte) (int, error) {
+	if l.buf.Len()+len(p) > l.max {
+		l.over = true
+		return 0, errors.New("output limit reached")
+	}
+	return l.buf.Write(p)
 }
 
 // Snapshot collects a snapshot from machine m.

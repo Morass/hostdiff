@@ -136,7 +136,7 @@ func TestLibraryAndToolchainCommands(t *testing.T) {
 		"gem install rake",
 		"cpanm Moose::Util",
 		`Rscript -e 'install.packages('\''data.table'\''`,
-		`julia -e 'using Pkg; Pkg.add("Plots")'`,
+		`julia --project=@v1.10 -e 'using Pkg; Pkg.add("Plots")'`,
 		"pyenv install --skip-existing 3.12.4",
 		"rustup toolchain install nightly-aarch64-apple-darwin",
 		"asdf install nodejs 22.1.0",
@@ -271,7 +271,8 @@ func TestCloneOrder(t *testing.T) {
 	r := &diff.Result{A: diff.Side{Label: "a", Snap: s}, B: diff.Side{Label: "b", Snap: s}, Sections: []diff.Section{
 		{Kind: "brew", Comparable: true,
 			OnlyA: []snapshot.Item{{Key: "tap › owner/tools"}, {Key: "formula › jq", Tag: "requested"}, {Key: "formula › lib", Tag: "dependency"}},
-			OnlyB: []snapshot.Item{{Key: "formula › wget", Tag: "requested"}}},
+			OnlyB: []snapshot.Item{{Key: "formula › wget", Tag: "requested"}},
+			Same:  []snapshot.Item{{Key: "tap › homebrew/core"}}},
 		{Kind: "packages", Comparable: true, Changed: []diff.Change{{Key: "npm › x", A: "1.0.0", B: "2.0.0"}}},
 	}}
 	var got []string
@@ -311,49 +312,181 @@ func TestInstallerRunsTheShownCommands(t *testing.T) {
 	}
 }
 
-// A font is a file: hostdiff copies it between the machines, and removes a
-// user font, but never touches a system one.
-func TestFontCopyAndRemove(t *testing.T) {
-	font := snapshot.Item{Key: "Inter Var.ttf", Value: "user", Tag: "Inter/Inter Var.ttf"}
-	a, ok := ForCopy("fonts", font, "darwin", "linux", "me@box", true)
-	if !ok || a.Verb != Copy || !strings.Contains(a.Argv[2], `ssh -- me@box 'mkdir -p "$HOME/.local/share/fonts" && cat > "$HOME/.local/share/fonts/Inter/Inter Var.ttf"' < "$HOME/Library/Fonts/Inter/Inter Var.ttf"`) {
-		t.Errorf("copy to the other machine: %q", a.Command())
-	}
-	a, _ = ForCopy("fonts", font, "darwin", "darwin", "me@box", false)
-	if !strings.Contains(a.Argv[2], `ssh -- me@box 'cat "$HOME/Library/Fonts/Inter/Inter Var.ttf"' > "$HOME/Library/Fonts/Inter/Inter Var.ttf"`) {
-		t.Errorf("copy from the other machine: %q", a.Command())
-	}
-	a, _ = ForRemove("fonts", font, "darwin")
-	if a.Verb != Remove || !strings.Contains(a.Argv[2], `rm -f "$HOME/Library/Fonts/Inter/Inter Var.ttf"`) {
-		t.Errorf("remove: %q", a.Command())
-	}
-	for _, bad := range []snapshot.Item{
-		{Key: "Helvetica.ttc", Value: "system"},
-		{Key: "x\".ttf", Value: "user", Tag: "x\".ttf"},
-		{Key: "esc.ttf", Value: "user", Tag: "../../../etc/passwd"},
-	} {
-		if a, _ := ForCopy("fonts", bad, "darwin", "darwin", "me@box", true); a.Runnable() {
-			t.Errorf("%q must not be copied: %q", bad.Key, a.Command())
+// fontWorld is two home folders and an ssh stand-in that runs the remote
+// command with HOME set to the other one, so copy commands really run.
+func fontWorld(t *testing.T) (local, remote, bin string) {
+	t.Helper()
+	root := t.TempDir()
+	local, remote, bin = filepath.Join(root, "local"), filepath.Join(root, "remote"), filepath.Join(root, "bin")
+	for _, d := range []string{local, remote, bin} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
 		}
-		if a, _ := ForRemove("fonts", bad, "darwin"); a.Runnable() {
-			t.Errorf("%q must not be removed: %q", bad.Key, a.Command())
-		}
+	}
+	ssh := "#!/bin/sh\nwhile [ $# -gt 0 ]; do if [ \"$1\" = \"--\" ]; then shift; break; fi; shift; done\nshift\nHOME=" + Quote(remote) + " exec /bin/sh -c \"$1\"\n"
+	if err := os.WriteFile(filepath.Join(bin, "ssh"), []byte(ssh), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return local, remote, bin
+}
+
+func runIn(t *testing.T, a Action, home, bin string) error {
+	t.Helper()
+	cmd := exec.Command("/bin/sh", "-c", a.Command())
+	cmd.Env = []string{"HOME=" + home, "PATH=" + bin + ":/usr/bin:/bin"}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Logf("%s: %s", a.Command(), out)
+	}
+	return err
+}
+
+// A font is a file: it is copied either way into the other system's font
+// folder, through a temporary name, and removed only where it was listed.
+func TestFontCopyRunsBothWays(t *testing.T) {
+	local, remote, bin := fontWorld(t)
+	src := filepath.Join(local, "Library/Fonts/Inter/Inter Var.ttf")
+	os.MkdirAll(filepath.Dir(src), 0o755)
+	os.WriteFile(src, []byte("font bytes"), 0o644)
+	font := snapshot.Item{Key: "Inter Var.ttf", Value: "user", Tag: "Library/Fonts/Inter/Inter Var.ttf"}
+
+	a, _ := ForCopy("fonts", font, "darwin", "linux", "me@box", []string{"-o", "ControlPath=/tmp/x y/%C"}, true)
+	if !a.Runnable() || !strings.Contains(a.Command(), "ControlPath=/tmp/x y/%C") {
+		t.Fatalf("copy: %+v", a)
+	}
+	if err := runIn(t, a, local, bin); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(filepath.Join(remote, ".local/share/fonts/Inter/Inter Var.ttf"))
+	if err != nil || string(got) != "font bytes" {
+		t.Fatalf("copied to the other machine: %q %v", got, err)
+	}
+
+	back := snapshot.Item{Key: "Inter Var.ttf", Value: "user", Tag: ".local/share/fonts/Inter/Inter Var.ttf"}
+	os.Remove(src)
+	a, _ = ForCopy("fonts", back, "darwin", "linux", "me@box", nil, false)
+	if err := runIn(t, a, local, bin); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := os.ReadFile(src); string(got) != "font bytes" {
+		t.Fatalf("copied back: %q", got)
+	}
+
+	a, _ = ForRemove("fonts", back, "linux")
+	if a.Verb != Remove || runIn(t, a, remote, bin) != nil {
+		t.Fatalf("remove: %+v", a)
+	}
+	if _, err := os.Stat(filepath.Join(remote, ".local/share/fonts/Inter/Inter Var.ttf")); err == nil {
+		t.Error("font not removed")
 	}
 }
 
-// The copy command is one argument list the shell reads literally.
-func TestFontCopyQuoting(t *testing.T) {
+// A link in a font folder is never followed: not read for a copy, not
+// written through at the destination, and a failed copy leaves no file.
+func TestFontCopyRefusesLinks(t *testing.T) {
+	local, remote, bin := fontWorld(t)
+	secret := filepath.Join(local, "secret")
+	os.WriteFile(secret, []byte("private key"), 0o600)
+	os.MkdirAll(filepath.Join(local, "Library/Fonts"), 0o755)
+	os.Symlink(secret, filepath.Join(local, "Library/Fonts/evil.ttf"))
+	a, _ := ForCopy("fonts", snapshot.Item{Key: "evil.ttf", Value: "user", Tag: "Library/Fonts/evil.ttf"}, "darwin", "darwin", "me@box", nil, true)
+	if runIn(t, a, local, bin) == nil {
+		t.Error("a linked font was copied")
+	}
+	if b, _ := os.ReadFile(filepath.Join(remote, "Library/Fonts/evil.ttf")); strings.Contains(string(b), "private") {
+		t.Fatal("the link target was sent")
+	}
+
+	target := filepath.Join(remote, "important")
+	os.WriteFile(target, []byte("keep"), 0o600)
+	os.MkdirAll(filepath.Join(remote, "Library/Fonts"), 0o755)
+	os.Symlink(target, filepath.Join(remote, "Library/Fonts/good.ttf"))
+	os.WriteFile(filepath.Join(local, "Library/Fonts/good.ttf"), []byte("font"), 0o644)
+	a, _ = ForCopy("fonts", snapshot.Item{Key: "good.ttf", Value: "user", Tag: "Library/Fonts/good.ttf"}, "darwin", "darwin", "me@box", nil, true)
+	if err := runIn(t, a, local, bin); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(target); string(b) != "keep" {
+		t.Fatalf("wrote through a link at the destination: %q", b)
+	}
+}
+
+// Nothing in a font name, a destination or ssh options runs as code.
+func TestFontCommandsAreInert(t *testing.T) {
+	local, _, bin := fontWorld(t)
 	marker := filepath.Join(t.TempDir(), "pwned")
-	for _, name := range []string{"a b.ttf", "x$(touch " + marker + ").ttf", "y`touch " + marker + "`.ttf", "z;touch " + marker + ".ttf"} {
-		a, _ := ForCopy("fonts", snapshot.Item{Key: name, Value: "user", Tag: name}, "darwin", "darwin", "me@box", true)
-		if !a.Runnable() {
-			continue
-		}
-		if strings.Contains(a.Command(), marker) && !strings.Contains(a.Command(), "'") {
-			t.Errorf("unquoted: %q", a.Command())
+	names := []string{"a;touch " + marker + ".ttf", "b$(touch " + marker + ").ttf", "c`touch " + marker + "`.ttf", "d'x.ttf", "../../x.ttf"}
+	for _, n := range names {
+		it := snapshot.Item{Key: n, Value: "user", Tag: "Library/Fonts/" + n}
+		for _, a := range []Action{
+			func() Action { a, _ := ForCopy("fonts", it, "darwin", "darwin", "me@box", nil, true); return a }(),
+			func() Action { a, _ := ForCopy("fonts", it, "darwin", "darwin", "me@box", nil, false); return a }(),
+			func() Action { a, _ := ForRemove("fonts", it, "darwin"); return a }(),
+		} {
+			if a.Runnable() {
+				runIn(t, a, local, bin)
+			}
 		}
 	}
+	a, _ := ForCopy("fonts", snapshot.Item{Key: "x.ttf", Value: "user", Tag: "Library/Fonts/x.ttf"}, "darwin", "darwin", "READM[E].md", []string{"-o", "x;touch " + marker}, true)
+	if !strings.Contains(a.Command(), "READM[E].md") {
+		t.Fatalf("destination: %q", a.Command())
+	}
+	runIn(t, a, local, bin)
 	if _, err := os.Stat(marker); err == nil {
-		t.Fatal("a font name ran a command")
+		t.Fatal("a font command ran injected code")
+	}
+	if a, _ := ForCopy("fonts", snapshot.Item{Key: "Helvetica.ttc", Value: "system"}, "darwin", "darwin", "me@box", nil, true); a.Runnable() {
+		t.Error("a system font would be copied")
+	}
+}
+
+// Registry names only: nothing a package manager reads as a path or URL.
+func TestPackageNamesAreNames(t *testing.T) {
+	for _, key := range []string{"npm › file:../../tmp/evil", "npm › user/repo", "npm › ../x", "pipx › ./local", "cargo › a/b", "uv › git+https://x/y"} {
+		if a, _ := ForMissing("packages", snapshot.Item{Key: key}); a.Runnable() {
+			t.Errorf("%s would run %q", key, a.Command())
+		}
+	}
+	for _, key := range []string{"npm › @scope/pkg", "npm › typescript", "pipx › black", "cargo › ripgrep"} {
+		if a, _ := ForMissing("packages", snapshot.Item{Key: key}); !a.Runnable() {
+			t.Errorf("%s refused: %+v", key, a)
+		}
+	}
+	if a, _ := ForMissing("brew", snapshot.Item{Key: "formula › owner/tap/tool", Tag: "requested"}); !a.Runnable() {
+		t.Errorf("tap formula refused: %+v", a)
+	}
+}
+
+// Clone does not remove what the source has nothing of (a list that could
+// not be read looks the same), and removes fonts from the target's folder.
+func TestCloneRemovalsAreScoped(t *testing.T) {
+	a := &snapshot.Snapshot{Host: snapshot.Host{OS: "darwin"}}
+	b := &snapshot.Snapshot{Host: snapshot.Host{OS: "linux"}}
+	r := &diff.Result{A: diff.Side{Label: "a", Snap: a}, B: diff.Side{Label: "b", Snap: b}, Sections: []diff.Section{
+		{Kind: "brew", Comparable: true,
+			Same:  []snapshot.Item{{Key: "formula › git", Tag: "requested"}},
+			OnlyA: []snapshot.Item{{Key: "formula › jq", Tag: "requested"}, {Key: "cask › rectangle"}}},
+		{Kind: "fonts", Comparable: true,
+			Same:  []snapshot.Item{{Key: "Fira.ttf", Value: "user", Tag: "Library/Fonts/Fira.ttf"}},
+			OnlyA: []snapshot.Item{{Key: "Inter.ttf", Value: "user", Tag: "Library/Fonts/Inter.ttf"}}},
+	}}
+	var cmds, notes []string
+	for _, act := range Clone(r, true) {
+		if act.Runnable() {
+			cmds = append(cmds, act.Command())
+		} else {
+			notes = append(notes, act.Key+": "+act.Note)
+		}
+	}
+	got := strings.Join(cmds, " | ")
+	if !strings.Contains(got, "brew uninstall jq") || strings.Contains(got, "rectangle") {
+		t.Errorf("casks removed although the source lists none: %s", got)
+	}
+	if !strings.Contains(strings.Join(notes, "|"), "cask › rectangle: not removed") {
+		t.Errorf("notes: %v", notes)
+	}
+	if !strings.Contains(got, `rm -f "$HOME/Library/Fonts/Inter.ttf"`) {
+		t.Errorf("font removal not in the target's folder: %s", got)
 	}
 }

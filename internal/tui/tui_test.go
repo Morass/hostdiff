@@ -12,6 +12,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/morass/hostdiff/internal/diff"
+	"github.com/morass/hostdiff/internal/fix"
 	"github.com/morass/hostdiff/internal/snapshot"
 )
 
@@ -48,7 +49,7 @@ func newFake() *fakeBackend {
 			snapshot.Item{Key: "python3.12 › requests", Value: "2.32.3", Tag: "user"},
 			snapshot.Item{Key: "gem › rake", Value: "13.2.1"}),
 		sec("dotfiles", "Dotfiles", snapshot.Item{Key: "~/.zshrc", Value: "content 1", Detail: "alias ll='ls -l'\n"}),
-		sec("fonts", "Fonts", snapshot.Item{Key: "Inter.ttf", Value: "user", Tag: "Inter.ttf"}),
+		sec("fonts", "Fonts", snapshot.Item{Key: "Inter.ttf", Value: "user", Tag: "Library/Fonts/Inter.ttf"}),
 	}}
 	desk := &snapshot.Snapshot{Format: 1, Created: time.Unix(0, 0), Host: host("dsk"), Sections: []snapshot.Section{
 		sec("brew", "Homebrew",
@@ -61,7 +62,7 @@ func newFake() *fakeBackend {
 			snapshot.Item{Key: "python3.12 › numpy", Value: "2.0", Tag: "system"},
 			snapshot.Item{Key: "gem › rake", Value: "13.2.1"}),
 		sec("dotfiles", "Dotfiles", snapshot.Item{Key: "~/.zshrc", Value: "content 2", Detail: "alias la='ls -la'\n"}),
-		sec("fonts", "Fonts", snapshot.Item{Key: "Fira.ttf", Value: "user", Tag: "Fira.ttf"}),
+		sec("fonts", "Fonts", snapshot.Item{Key: "Fira.ttf", Value: "user", Tag: "Library/Fonts/Fira.ttf"}),
 	}}
 	f := &fakeBackend{full: [2]*snapshot.Snapshot{laptop, desk}}
 	prep := func(script string) (*Started, error) {
@@ -313,9 +314,10 @@ func TestCloneAsksToTypeYesWhenRemoving(t *testing.T) {
 	f.results = map[int]int{1: 0, 2: 0, 3: 0, 4: 0}
 	a := started(t, f, Start{B: "desk", Kinds: []string{"brew"}})
 	press(a, "C")
-	must(t, a.View(), "Make laptop like desk: 1 install, 1 update, 2 remove", "Make desk like laptop")
+	// desk lists no casks at all, so the cask here is not removed.
+	must(t, a.View(), "Make laptop like desk: 1 install, 1 update, 1 remove", "Make desk like laptop")
 	press(a, "enter")
-	must(t, a.View(), "type yes", "4 commands on laptop", "1  brew install wget", "2  brew upgrade node", "brew uninstall jq", "brew uninstall --cask rectangle", "deletes 2 items from laptop")
+	must(t, a.View(), "type yes", "3 commands on laptop", "1  brew install wget", "2  brew upgrade node", "3  brew uninstall jq", "deletes 1 items from laptop", "cask › rectangle: not removed")
 	if cmd := press(a, "y", "enter"); cmd != nil || a.view.confirm == nil {
 		t.Fatal("clone ran without yes typed out")
 	}
@@ -427,16 +429,16 @@ func TestFailedCommandIsReported(t *testing.T) {
 	must(t, a.View(), "What the last run did on laptop", "its output is in the terminal above")
 }
 
-// Commands that never ran (Ctrl-C) are not counted as done.
+// Commands without a recorded result (Ctrl-C) are not counted as done.
 func TestStoppedRunSaysNotRun(t *testing.T) {
 	f := newFake()
 	f.results = map[int]int{}
 	a := started(t, f, Start{B: "desk", Kinds: []string{"brew"}})
 	press(a, "tab", "j", "enter", "enter") // jq: install on desk
 	run(t, a, press(a, "y"))
-	must(t, a.View(), "What the last run did on desk", "never ran")
+	must(t, a.View(), "What the last run did on desk", "no result recorded")
 	press(a, "esc")
-	must(t, a.View(), "desk: 0 of 1 installed, 1 not run")
+	must(t, a.View(), "desk: 0 of 1 installed, 1 without a result")
 }
 
 // Escape steps back: table → groups → machines → quit, so holding it leaves.
@@ -550,7 +552,7 @@ func TestFontIsCopied(t *testing.T) {
 	press(a, "tab", "enter")
 	must(t, a.View(), "Copy the file to desk", "Remove from laptop")
 	press(a, "enter")
-	must(t, a.View(), "Copy", "ssh -- desk", "$HOME/Library/Fonts/Inter.ttf")
+	must(t, a.View(), "Copy", "ssh -- ", "desk", "$HOME/Library/Fonts/Inter.ttf")
 	run(t, a, press(a, "enter"))
 	must(t, a.View(), "laptop: 1 of 1 copied")
 }
@@ -581,4 +583,81 @@ func TestEscapeDuringScan(t *testing.T) {
 	if _, ok := cmd().(tea.QuitMsg); !ok {
 		t.Fatal("esc while checking did not quit")
 	}
+}
+
+// Removing an item that looks the same on both machines uses each
+// machine's own details (here: a font in different folders).
+func TestEqualRowRemovesWithThatSidesDetails(t *testing.T) {
+	f := newFake()
+	f.full[0].Sections[3].Items = append(f.full[0].Sections[3].Items, snapshot.Item{Key: "Same.ttf", Value: "user", Tag: "Library/Fonts/A/Same.ttf"})
+	f.full[1].Sections[3].Items = append(f.full[1].Sections[3].Items, snapshot.Item{Key: "Same.ttf", Value: "user", Tag: "Library/Fonts/B/Same.ttf"})
+	a := started(t, f, Start{B: "desk", Kinds: []string{"fonts"}})
+	press(a, "a", "tab")
+	for i := 0; i < 5 && !strings.Contains(a.View(), "› "); i++ {
+		v := a.View()
+		if strings.Contains(v, "=   Same.ttf") || strings.Contains(v, "= ● Same.ttf") {
+			break
+		}
+	}
+	rows := a.view.rows()
+	for i, r := range rows {
+		if r.key == "Same.ttf" {
+			a.view.row = i
+		}
+	}
+	press(a, "enter")
+	must(t, a.View(), "Remove from desk")
+	var byside [2]string
+	for _, sa := range a.view.actions(a.view.rows()[a.view.row]) {
+		if sa.act.Verb == "remove" {
+			byside[sa.side] = sa.act.Command()
+		}
+	}
+	if !strings.Contains(byside[0], "Fonts/A/Same.ttf") || !strings.Contains(byside[1], "Fonts/B/Same.ttf") {
+		t.Fatalf("removals: %q", byside)
+	}
+}
+
+// Copies in opposite directions are separate choices, named after the
+// machine the file lands on, and that machine is scanned afterwards.
+func TestCopiesAreGroupedByDestination(t *testing.T) {
+	f := newFake()
+	f.results = map[int]int{1: 0}
+	a := started(t, f, Start{B: "desk", Kinds: []string{"fonts"}})
+	press(a, "tab", "ctrl+a", "enter")
+	must(t, a.View(), "Copy the file to desk", "Copy the file to laptop")
+	// Choose the copy to desk: it runs here but desk is scanned again.
+	for i, c := range a.view.menu {
+		if c.verb == "copy" && c.to == 1 {
+			a.view.menuCur = i
+		}
+	}
+	press(a, "enter")
+	run(t, a, press(a, "enter"))
+	if last := f.collected[len(f.collected)-1]; last != "1 [fonts]" {
+		t.Fatalf("scanned %q after copying to desk", last)
+	}
+}
+
+// A clone that only resets settings still asks for yes to be typed.
+func TestCloneResetNeedsTypedYes(t *testing.T) {
+	v := &view{confirm: &choice{clone: true, acts: []fix.Action{{Verb: fix.Reset, Argv: []string{"defaults", "delete", "a", "b"}}}}}
+	if !v.needTyped() {
+		t.Fatal("a clone resetting settings did not ask for yes")
+	}
+}
+
+// A run that ended with an error and reported nothing is not "never ran":
+// the report says what is known.
+func TestRunErrorIsReported(t *testing.T) {
+	f := newFake()
+	f.results = map[int]int{}
+	a := started(t, f, Start{B: "desk", Kinds: []string{"brew"}})
+	press(a, "tab", "j", "enter", "enter")
+	cmd := press(a, "enter")
+	prepared := cmd().(preparedMsg)
+	a.Update(prepared)
+	_, refresh := a.Update(ranMsg{preparedMsg: prepared, err: errors.New("exit status 255")})
+	a.Update(refresh())
+	must(t, a.View(), "The run itself ended with an error: exit status 255", "no result recorded")
 }

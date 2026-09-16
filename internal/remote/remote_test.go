@@ -115,3 +115,16 @@ func TestProgressWriter(t *testing.T) {
 		t.Errorf("progress %+v", got)
 	}
 }
+
+// The remote side names the temporary folder; anything but a plain path is
+// refused before it reaches a command line.
+func TestInstallRefusesHostileFolder(t *testing.T) {
+	for _, reply := range []string{"/tmp/x; rm -rf ~", "/tmp/a'b", "/tmp/$HOME", "relative/path", "/tmp/a b"} {
+		p := filepath.Join(t.TempDir(), "ssh")
+		os.WriteFile(p, []byte("#!/bin/sh\ncat >/dev/null\necho '"+strings.ReplaceAll(reply, "'", "'\\''")+"'\n"), 0o755)
+		t.Setenv("HOSTDIFF_SSH", p)
+		if in, err := InstallCommand(&config.Machine{Name: "box", SSH: "box"}, "echo hi", false); err == nil {
+			t.Errorf("accepted %q: %v", reply, in.Cmd.Args)
+		}
+	}
+}

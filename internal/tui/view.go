@@ -34,7 +34,8 @@ type row struct {
 }
 
 type sideAction struct {
-	side int
+	side int // the machine the command runs on
+	to   int // the machine it changes (differs only for a copy)
 	act  fix.Action
 }
 
@@ -42,6 +43,7 @@ type sideAction struct {
 type choice struct {
 	verb     string
 	side     int
+	to       int          // the machine whose state changes
 	acts     []fix.Action // runnable
 	notes    []fix.Action // without a command, with the reason
 	details  bool
@@ -79,6 +81,7 @@ type refreshedMsg struct {
 	err     error
 	results map[int]int
 	resErr  error
+	runErr  error
 }
 
 // view is the comparison screen: groups on the left, a table of what
@@ -312,10 +315,10 @@ func (v *view) copyAction(r row, to int) (fix.Action, bool) {
 	switch {
 	case sideTo.Remote && !sideFrom.Remote && sideFrom.Prepare != nil:
 		// From this machine to the other one.
-		a, ok := fix.ForCopy(r.kind, *r.item, v.osOf(from), v.osOf(to), sideTo.Dest, true)
+		a, ok := fix.ForCopy(r.kind, *r.item, v.osOf(from), v.osOf(to), sideTo.Dest, sideTo.SSHOpts, true)
 		return a, ok
 	case sideFrom.Remote && !sideTo.Remote && sideTo.Prepare != nil:
-		a, ok := fix.ForCopy(r.kind, *r.item, v.osOf(to), v.osOf(from), sideFrom.Dest, false)
+		a, ok := fix.ForCopy(r.kind, *r.item, v.osOf(to), v.osOf(from), sideFrom.Dest, sideFrom.SSHOpts, false)
 		return a, ok
 	}
 	return fix.Action{Kind: r.kind, Key: r.key, Verb: fix.Copy, Note: "a font can only be copied between this machine and one reached over ssh"}, true
@@ -326,7 +329,7 @@ func (v *view) actions(r row) []sideAction {
 	var out []sideAction
 	add := func(side int, a fix.Action, ok bool) {
 		if ok {
-			out = append(out, sideAction{side, a})
+			out = append(out, sideAction{side: side, to: side, act: a})
 		}
 	}
 	// A copy runs on whichever machine has ssh, which is this one.
@@ -339,7 +342,7 @@ func (v *view) actions(r row) []sideAction {
 		if v.b.Side(to).Remote {
 			on = 1 - to
 		}
-		out = append(out, sideAction{on, a})
+		out = append(out, sideAction{side: on, to: to, act: a})
 	}
 	switch r.mark {
 	case "◀":
@@ -365,10 +368,16 @@ func (v *view) actions(r row) []sideAction {
 		a, ok = fix.ForRemove(r.kind, snapshot.Item{Key: c.Key, Value: c.B, Tag: c.TagB}, v.osOf(1))
 		add(1, a, ok)
 	case "=":
-		a, ok := fix.ForRemove(r.kind, *r.item, v.osOf(0))
-		add(0, a, ok)
-		a, ok = fix.ForRemove(r.kind, *r.item, v.osOf(1))
-		add(1, a, ok)
+		// Equal values can still differ in what the command needs (a font's
+		// folder, an App Store id): each side's removal uses its own item.
+		for side := 0; side < 2; side++ {
+			it, found := lookupItem(v.snapOf(v.res, side), r.kind, r.key)
+			if !found {
+				continue
+			}
+			a, ok := fix.ForRemove(r.kind, it, v.osOf(side))
+			add(side, a, ok)
+		}
 	}
 	return out
 }
@@ -424,10 +433,10 @@ func (v *view) openMenu() {
 	var list []*choice
 	for _, r := range rows {
 		for _, sa := range v.actions(r) {
-			id := [2]int{verbOrder[sa.act.Verb], sa.side}
+			id := [2]int{verbOrder[sa.act.Verb]*2 + sa.to, sa.side}
 			c := byKey[id]
 			if c == nil {
-				c = &choice{verb: sa.act.Verb, side: sa.side}
+				c = &choice{verb: sa.act.Verb, side: sa.side, to: sa.to}
 				byKey[id] = c
 				list = append(list, c)
 			}
@@ -484,7 +493,7 @@ func (v *view) openCloneMenu() {
 	l := v.labels()
 	v.menu = nil
 	for side := 0; side < 2; side++ {
-		c := choice{clone: true, side: side}
+		c := choice{clone: true, side: side, to: side}
 		for _, a := range fix.Clone(v.res, side == 0) {
 			if a.Runnable() {
 				c.acts = append(c.acts, a)
@@ -530,13 +539,18 @@ func (v *view) choiceLabel(c choice) string {
 		s = icon(c.verb) + " Install on " + on
 	case c.verb == fix.Copy:
 		// A copy runs here but lands on whichever machine lacks the file.
-		to := other
-		if !v.b.Side(c.side).Remote && !v.b.Side(1-c.side).Remote {
-			to = other
-		}
-		s = icon(c.verb) + " Copy the file to " + to
+		s = icon(c.verb) + " Copy the file to " + l[c.to]
 	case c.verb == fix.Update:
 		s = icon(c.verb) + fmt.Sprintf(" Update on %s to %s's version", on, other)
+		if len(c.acts) == 1 && len(c.notes) == 0 {
+			if ch := v.changeOf(c.acts[0]); ch != nil {
+				have, want := ch.A, ch.B
+				if c.side == 1 {
+					have, want = ch.B, ch.A
+				}
+				s += fmt.Sprintf(" (%s → %s)", have, want)
+			}
+		}
 	case c.verb == fix.Set:
 		s = icon(c.verb) + fmt.Sprintf(" Set on %s as on %s", on, other)
 	case c.verb == fix.Remove:
@@ -591,7 +605,7 @@ func (v *view) openConfirm(c choice) {
 		fmt.Sprintf("hostdiff will run these %d commands on %s, in this order, exactly as written:", len(c.acts), on),
 		"",
 	}
-	removals := 0
+	removals, resets := 0, 0
 	prev := ""
 	for i, a := range c.acts {
 		if a.Verb != prev {
@@ -599,13 +613,19 @@ func (v *view) openConfirm(c choice) {
 			prev = a.Verb
 		}
 		lines = append(lines, fmt.Sprintf("  %3d  %s", i+1, a.Command()))
-		if a.Verb == fix.Remove {
+		switch a.Verb {
+		case fix.Remove:
 			removals++
+		case fix.Reset:
+			resets++
 		}
 	}
 	lines = append(lines, "")
 	if removals > 0 {
-		lines = append(lines, fmt.Sprintf("Remove: this deletes %d items from %s.", removals, l[c.side]), "")
+		lines = append(lines, fmt.Sprintf("Remove: this deletes %d items from %s.", removals, l[c.to]), "")
+	}
+	if resets > 0 {
+		lines = append(lines, fmt.Sprintf("Remove: this resets %d settings on %s to their defaults.", resets, l[c.to]), "")
 	}
 	if len(c.notes) > 0 {
 		lines = append(lines, fmt.Sprintf("# Not included, no command (%d):", len(c.notes)))
@@ -655,11 +675,44 @@ func (v *view) needTyped() bool {
 		return false
 	}
 	for _, a := range v.confirm.acts {
-		if a.Verb == fix.Remove {
+		if a.Verb == fix.Remove || a.Verb == fix.Reset {
 			return true
 		}
 	}
 	return false
+}
+
+// changeOf finds the difference an action was built for.
+func (v *view) changeOf(a fix.Action) *diff.Change {
+	for i := range v.res.Sections {
+		s := &v.res.Sections[i]
+		if s.Kind != a.Kind {
+			continue
+		}
+		for j := range s.Changed {
+			if s.Changed[j].Key == a.Key {
+				return &s.Changed[j]
+			}
+		}
+	}
+	return nil
+}
+
+func lookupItem(s *snapshot.Snapshot, kind, key string) (snapshot.Item, bool) {
+	if s == nil {
+		return snapshot.Item{}, false
+	}
+	for _, sec := range s.Sections {
+		if sec.Kind != kind {
+			continue
+		}
+		for _, it := range sec.Items {
+			if it.Key == key {
+				return it, true
+			}
+		}
+	}
+	return snapshot.Item{}, false
 }
 
 func lookup(s *snapshot.Snapshot, kind, key string) (string, bool) {
@@ -722,6 +775,7 @@ func (v *view) handle(msg tea.Msg) tea.Cmd {
 		v.status = "running on " + l[msg.job.side] + "…"
 		return tea.ExecProcess(msg.run.Cmd, func(err error) tea.Msg { return ranMsg{preparedMsg: msg, err: err} })
 	case ranMsg:
+		runErr := msg.err
 		results, resErr := map[int]int{}, error(nil)
 		if msg.run.Results != nil {
 			results, resErr = msg.run.Results()
@@ -737,13 +791,15 @@ func (v *view) handle(msg tea.Msg) tea.Cmd {
 				kinds = append(kinds, a.Kind)
 			}
 		}
-		v.status = "scanning " + strings.Join(kinds, ", ") + " on " + l[msg.job.side] + " again…"
+		v.status = "scanning " + strings.Join(kinds, ", ") + " on " + l[msg.job.to] + " again…"
 		b, j, all := v.b, msg.job, v.kinds
 		return func() tea.Msg {
-			if err := b.Collect(j.side, kinds, nil); err != nil {
-				return refreshedMsg{job: j, err: err, results: results, resErr: resErr}
+			// Scan the machine that changed, which for a copy is not the one
+			// the command ran on.
+			if err := b.Collect(j.to, kinds, nil); err != nil {
+				return refreshedMsg{job: j, err: err, results: results, resErr: resErr, runErr: runErr}
 			}
-			return refreshedMsg{job: j, res: b.Result(all), results: results, resErr: resErr}
+			return refreshedMsg{job: j, res: b.Result(all), results: results, resErr: resErr, runErr: runErr}
 		}
 	case refreshedMsg:
 		v.busy = false
@@ -770,7 +826,7 @@ func (v *view) record(msg refreshedMsg) {
 	for i, a := range msg.job.acts {
 		code, reported := msg.results[i+1]
 		v.outcome[selKey(a.Kind, a.Key)] = outcome{verb: a.Verb, code: code, ran: reported}
-		mark, tail := styleDim.Render("?"), "  (never ran: stopped, or the run ended early)"
+		mark, tail := styleDim.Render("?"), "  (no result recorded: it did not run, or the connection ended before it reported)"
 		switch {
 		case !reported:
 			unknown++
@@ -784,12 +840,15 @@ func (v *view) record(msg refreshedMsg) {
 		v.lastRun = append(v.lastRun, fmt.Sprintf("%s %3d  %s%s", mark, i+1, a.Command(), tail))
 	}
 	v.lastRun = append(v.lastRun, "")
+	if msg.runErr != nil {
+		v.lastRun = append(v.lastRun, "# The run itself ended with an error: "+msg.runErr.Error(), "")
+	}
 	if msg.resErr != nil {
 		v.lastRun = append(v.lastRun, "# The exit statuses could not be read back: "+msg.resErr.Error(), "")
 	}
 	v.lastRun = append(v.lastRun,
 		"# ✓ the command succeeded, ✗ it failed (its output is in the terminal above),",
-		"# ? it never ran.",
+		"# ? no result was recorded: it may not have run, or the connection ended before it reported.",
 		"# The groups were scanned again afterwards, so the table shows how things are now.")
 	done := map[string]string{fix.Install: "installed", fix.Copy: "copied", fix.Update: "updated", fix.Set: "set", fix.Remove: "removed", fix.Reset: "reset"}[msg.job.verb]
 	if msg.job.clone || done == "" {
@@ -800,7 +859,7 @@ func (v *view) record(msg refreshedMsg) {
 		v.lastSummary += fmt.Sprintf(", %d failed", failed)
 	}
 	if unknown > 0 {
-		v.lastSummary += fmt.Sprintf(", %d not run", unknown)
+		v.lastSummary += fmt.Sprintf(", %d without a result", unknown)
 	}
 	v.lastSummary += " · o shows every command"
 	v.status = v.lastSummary
