@@ -154,7 +154,10 @@ type target struct {
 	save    string          // label to save under
 }
 
-var savedRe = regexp.MustCompile(`^([A-Za-z0-9][A-Za-z0-9._-]{0,63})@(last|prev)$`)
+var (
+	savedRe     = regexp.MustCompile(`^([A-Za-z0-9][A-Za-z0-9._-]{0,63})@(last|prev)$`)
+	savedNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+)
 
 func resolve(cfg *config.Config, arg string) (*target, error) {
 	if m := savedRe.FindStringSubmatch(arg); m != nil {
@@ -179,17 +182,46 @@ func resolve(cfg *config.Config, arg string) (*target, error) {
 		}
 		return t, nil
 	}
+	if dest, ok := strings.CutPrefix(arg, "ssh:"); ok {
+		m, err := config.AdHoc(dest)
+		if err != nil {
+			return nil, err
+		}
+		return adHocTarget(dest, m), nil
+	}
 	if strings.Contains(arg, "/") || strings.HasSuffix(arg, ".json") {
 		if _, err := os.Stat(arg); err != nil {
 			return nil, err
 		}
 		return &target{label: snapshot.StripControls(strings.TrimSuffix(filepath.Base(arg), ".json")), file: arg}, nil
 	}
+	// A destination that is not in the config: ssh:DEST always, and a name
+	// that can only be a host (user@host, host.domain, an address).
+	if strings.ContainsAny(arg, "@.:") {
+		m, err := config.AdHoc(arg)
+		if err != nil {
+			return nil, err
+		}
+		return adHocTarget(arg, m), nil
+	}
 	hint := "run: hostdiff config init"
 	if cfg.Found {
 		hint = "machines in " + cfg.Path + ": " + strings.Join(cfg.Names(), ", ")
 	}
-	return nil, fmt.Errorf("%q is not a configured machine, \"localhost\", or a snapshot file (%s)", arg, hint)
+	return nil, fmt.Errorf("%q is not a configured machine, \"localhost\", a snapshot file, or ssh:DESTINATION (%s)", arg, hint)
+}
+
+// adHocTarget names a machine that is not in the config after its host.
+func adHocTarget(dest string, m *config.Machine) *target {
+	label := dest
+	if _, host, ok := strings.Cut(dest, "@"); ok && host != "" {
+		label = host
+	}
+	save := ""
+	if savedNameRe.MatchString(label) {
+		save = label
+	}
+	return &target{label: label, save: save, machine: m}
 }
 
 func stateDir() string {

@@ -187,6 +187,13 @@ operating system and architecture, `upload = "auto"` streams this binary over
 the ssh connection into a private temporary folder, runs it once and deletes
 it. Otherwise install hostdiff there, or use snapshot files.
 
+**Machines that are not in the config.** In the picker, "something else…"
+takes an ssh destination (`me@host`, or a `Host` alias), a snapshot file or
+`NAME@last`. On the command line the same works directly:
+`hostdiff diff ssh:me@host`, `hostdiff diff laptop.json`,
+`hostdiff diff laptop@last`. A name with `@`, `.` or `:` in it is taken as a
+host, so `hostdiff diff box.local` needs no config at all.
+
 **Saved snapshots.** `--save` keeps a snapshot under
 `~/.local/state/hostdiff/snapshots/NAME/`, and `NAME@last` (or `NAME@prev`)
 refers to it later: `hostdiff diff laptop@last laptop` shows what changed on

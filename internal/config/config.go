@@ -111,6 +111,16 @@ func Load(path string) (*Config, error) {
 	return c, nil
 }
 
+// AdHoc makes a machine that is not in the config file, from an ssh
+// destination the user typed (in the machine picker, or on the command
+// line as ssh:DESTINATION).
+func AdHoc(dest string) (*Machine, error) {
+	if !sshRe.MatchString(dest) {
+		return nil, fmt.Errorf("%q is not a plain ssh destination (a Host alias from ~/.ssh/config, or user@host)", dest)
+	}
+	return &Machine{Name: dest, SSH: dest, Upload: "auto"}, nil
+}
+
 func (c *Config) validate() error {
 	for name, m := range c.Machines {
 		if m == nil {

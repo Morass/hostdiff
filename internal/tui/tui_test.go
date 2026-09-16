@@ -417,3 +417,30 @@ func TestEscapeGoesBack(t *testing.T) {
 		t.Fatalf("esc did not return to the table: %v", a.screen)
 	}
 }
+
+// Anything that is not in the config file can be typed in the machine
+// picker: an ssh destination, a snapshot file, NAME@last.
+func TestCustomMachineIsTypedIn(t *testing.T) {
+	f := newFake()
+	a := newApp(f, Start{})
+	a.Update(tea.WindowSizeMsg{Width: 130, Height: 30})
+	must(t, a.View(), "something else…", "an ssh destination, a snapshot file, or NAME@last")
+	press(a, "j", "j", "enter")
+	must(t, a.View(), "Compare with:", "type a destination")
+	press(a, "m", "e", "@", "b", "o", "x", "enter")
+	if a.bName != "me@box" || a.screen != screenGroups {
+		t.Fatalf("typed destination not used: %q, screen %v\n%s", a.bName, a.screen, a.View())
+	}
+}
+
+func TestCustomMachineRefusedIsExplained(t *testing.T) {
+	f := newFake()
+	a := newApp(f, Start{})
+	a.Update(tea.WindowSizeMsg{Width: 130, Height: 30})
+	press(a, "j", "j", "enter")
+	press(a, "l", "a", "p", "t", "o", "p", "enter")
+	must(t, a.View(), "same machine")
+	if a.screen != screenMachines {
+		t.Fatalf("moved on after a refused machine")
+	}
+}

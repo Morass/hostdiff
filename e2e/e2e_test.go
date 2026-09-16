@@ -442,3 +442,24 @@ func TestInstallOnEitherSide(t *testing.T) {
 		t.Errorf("unknown side: %+v", r)
 	}
 }
+
+// A machine that is not in the config file: ssh:DESTINATION, and a host
+// name that can only be a host.
+func TestAdHocDestination(t *testing.T) {
+	w := newWorld(t)
+	w.remote("box.example", "jq 1.7.1\nripgrep 14.1.0\n", "", true)
+	w.writeConfig("")
+	r := w.run("diff", "ssh:box.example", "--only", "brew", "--no-color")
+	if r.code != 1 || !strings.Contains(r.stdout, "▶ formula › ripgrep") || !strings.Contains(r.stdout, "▶ box.example") {
+		t.Fatalf("ssh: destination: %+v", r)
+	}
+	if plain := w.run("diff", "box.example", "--only", "brew", "--no-color"); plain.code != 1 {
+		t.Errorf("host-shaped name: %+v", plain)
+	}
+	if bad := w.run("diff", "nosuchmachine", "--only", "brew"); bad.code != 2 || !strings.Contains(bad.stderr, "ssh:DESTINATION") {
+		t.Errorf("unknown plain name: %+v", bad)
+	}
+	if evil := w.run("diff", "ssh:-oProxyCommand=touch /tmp/x", "--only", "brew"); evil.code != 2 || !strings.Contains(evil.stderr, "plain ssh destination") {
+		t.Errorf("option-shaped destination: %+v", evil)
+	}
+}

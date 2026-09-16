@@ -133,11 +133,13 @@ type App struct {
 	width, height int
 	note          string
 
-	here   Machine
-	others []Machine
-	mcur   int
-	aName  string
-	bName  string
+	here     Machine
+	others   []Machine
+	mcur     int
+	custom   string
+	entering bool
+	aName    string
+	bName    string
 
 	groups []Group
 	gcur   int
@@ -329,6 +331,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // typing reports whether keys are text input rather than commands.
 func (a *App) typing() bool {
+	if a.screen == screenMachines {
+		return a.entering
+	}
 	return a.screen == screenView && a.view != nil && (a.view.filtering || a.view.needTyped())
 }
 
@@ -388,6 +393,25 @@ func (a *App) key(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (a *App) keyMachines(k string) tea.Cmd {
+	// The last row is typed in: an ssh destination, a snapshot file or
+	// NAME@last.
+	if a.entering {
+		switch k {
+		case "esc":
+			a.entering, a.custom, a.note = false, "", ""
+		case "enter":
+			return a.chooseMachine(a.custom)
+		case "backspace":
+			if r := []rune(a.custom); len(r) > 0 {
+				a.custom = string(r[:len(r)-1])
+			}
+		default:
+			if len([]rune(k)) == 1 || k == " " {
+				a.custom += k
+			}
+		}
+		return nil
+	}
 	switch k {
 	case "q":
 		return tea.Quit
@@ -396,24 +420,34 @@ func (a *App) keyMachines(k string) tea.Cmd {
 			a.screen = screenView
 		}
 	case "down", "j":
-		a.mcur = min(a.mcur+1, len(a.others)-1)
+		a.mcur = min(a.mcur+1, len(a.others))
 	case "up", "k":
 		a.mcur = max(a.mcur-1, 0)
 	case "enter", "right", "l":
-		if len(a.others) == 0 {
+		if a.mcur >= len(a.others) {
+			a.entering, a.note = true, ""
 			return nil
 		}
 		name := a.others[a.mcur].Name
-		if err := a.b.Select(a.aName, name); err != nil {
-			a.note = err.Error()
-			return nil
-		}
-		if name != a.bName {
-			a.view = nil
-		}
-		a.bName, a.note = name, ""
-		a.screen = screenGroups
+		return a.chooseMachine(name)
 	}
+	return nil
+}
+
+// chooseMachine takes the other side and moves on to the groups.
+func (a *App) chooseMachine(name string) tea.Cmd {
+	if strings.TrimSpace(name) == "" {
+		return nil
+	}
+	if err := a.b.Select(a.aName, name); err != nil {
+		a.note = err.Error()
+		return nil
+	}
+	if name != a.bName {
+		a.view = nil
+	}
+	a.bName, a.note, a.entering = name, "", false
+	a.screen = screenGroups
 	return nil
 }
 
@@ -515,20 +549,25 @@ func (a *App) viewMachines() string {
 	if len(a.others) == 0 {
 		lines = append(lines, "", "  No other machines are configured.", "  Add one to the config file (hostdiff config path), then start hostdiff again.")
 	}
+	rows := append([]Machine{}, a.others...)
+	rows = append(rows, Machine{Name: "something else…", Where: "an ssh destination, a snapshot file, or NAME@last"})
 	nw := 0
-	for _, m := range a.others {
+	for _, m := range rows {
 		nw = max(nw, ansi.StringWidth(m.Name))
 	}
 	top := max(0, a.mcur-(a.height-10))
-	for i, m := range a.others {
+	for i, m := range rows {
 		if i < top {
 			continue
 		}
 		l := "  " + padTo(m.Name, nw) + "   " + styleDim.Render(m.Where)
 		if i == a.mcur {
-			l = styleSel.Render(padTo("› "+padTo(m.Name, nw)+"   "+m.Where, min(a.width, nw+len(m.Where)+8)))
+			l = styleSel.Render(padTo("› "+padTo(m.Name, nw)+"   "+m.Where, min(a.width, nw+ansi.StringWidth(m.Where)+8)))
 		}
 		lines = append(lines, l)
+	}
+	if a.entering {
+		lines = append(lines, "", "  Compare with: "+a.custom+"▏", styleDim.Render("  ssh destination (me@host, a Host from ~/.ssh/config), path to a snapshot, or NAME@last"))
 	}
 	if a.note != "" {
 		lines = append(lines, "", styleBad.Render(a.note))
@@ -536,6 +575,9 @@ func (a *App) viewMachines() string {
 	footer := "↑↓ choose · enter continue · q quit"
 	if a.view != nil {
 		footer = "↑↓ choose · enter continue · esc back to the table · q quit"
+	}
+	if a.entering {
+		footer = "type a destination · enter continue · esc cancel"
 	}
 	return a.screenLines(lines, footer)
 }

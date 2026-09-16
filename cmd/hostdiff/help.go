@@ -23,6 +23,9 @@ A is this machine. A and B can be:
 
   NAME          a machine from the config file (reached over ssh, or local)
   localhost     this machine (also "local" or ".")
+  ssh:DEST      a machine that is not in the config file (user@host, or a
+                Host alias from ~/.ssh/config); a name containing @ . or :
+                is taken as a destination too
   FILE.json     a snapshot saved with "hostdiff snap -o FILE.json"
   NAME@last     the newest snapshot saved with --save for NAME (also @prev)
 
