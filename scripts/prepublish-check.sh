@@ -17,6 +17,14 @@ while read -r e; do
 	esac
 done < <(git log --all --format='%ae%n%ce' | sort -u)
 
+# Files that belong to the toolchain that built this repository, not to the
+# repository: a template copied in during setup and never deleted.
+templates='(^|/)(screenshots-harness\.sh|README-skeleton\.md|review-claim\.md|private-patterns\.example|TEMPLATE\.md)$'
+tmpl=$(git ls-files | grep -E "$templates")
+[ -n "$tmpl" ] && { echo "$tmpl"; hit "build-process templates are tracked"; }
+tmplpast=$(git log --all --name-only --format= | sort -u | grep -E "$templates")
+[ -n "$tmplpast" ] && { echo "$tmplpast"; hit "build-process templates exist in history"; }
+
 agentfiles='(^|/)(AGENTS(\.override)?\.md|CLAUDE\.md|GEMINI\.md|\.cursorrules|copilot-instructions\.md)$|(^|/)\.(claude|cursor|agents)/'
 tracked=$(git ls-files | grep -E "$agentfiles")
 [ -n "$tracked" ] && { echo "$tracked"; hit "agent instruction files are tracked"; }
@@ -24,7 +32,7 @@ past=$(git log --all --name-only --format= | sort -u | grep -E "$agentfiles")
 [ -n "$past" ] && { echo "$past"; hit "agent instruction files exist in history"; }
 
 paths=$(git grep -nIE '/Users/[A-Za-z][A-Za-z0-9_-]+/|/home/[a-z][a-z0-9_-]+/|(^|[^0-9.v])[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}([^0-9.]|$)' -- "$self" ':!go.sum' |
-	grep -vE '/Users/(you|u|alice|bob|recorded|nonexistent)/|/home/(u|bob|linuxbrew|secret)/|0\.0\.0\.0|127\.0\.0\.1')
+	grep -vE '/Users/(you|u|alice|bob|recorded|nonexistent)/|/home/(u|bob|linuxbrew|secret)/|0\.0\.0\.0|127\.0\.0\.1|192\.0\.2\.|198\.51\.100\.|203\.0\.113\.')
 [ -n "$paths" ] && { echo "$paths"; hit "home paths or IP addresses above"; }
 
 tokens=$(git grep -nIE 'gh[pousr]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{22,}|AKIA[0-9A-Z]{16}|sk-ant-[A-Za-z0-9_-]{20,}|xox[abposr]-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{35}|npm_[A-Za-z0-9]{36}|-----BEGIN [A-Z ]*PRIVATE KEY-----' -- "$self")
@@ -41,7 +49,16 @@ if [ -s .git/info/private-patterns ]; then
 		[ -n "$files" ] && { echo "$files"; hit "private patterns found in files"; }
 		msgs=$(git log --all --format='%h %s%n%b' | grep -iE "$pp")
 		[ -n "$msgs" ] && { echo "$msgs"; hit "private patterns found in commit messages"; }
-		n=$(git log --all -p -- . "$self" | grep -ciE "$pp")
+		# History the owner has decided to leave alone can be listed, one
+		# extended regex per line, in .git/info/private-exceptions (local,
+		# never committed). Only past diffs can be excused this way: the
+		# working tree and commit messages are always checked in full.
+		past=$(git log --all -p -- . "$self" | grep -iE "$pp")
+		if [ -s .git/info/private-exceptions ]; then
+			ex=$(grep -v '^[[:space:]]*\(#\|$\)' .git/info/private-exceptions | paste -sd'|' -)
+			[ -n "$ex" ] && past=$(printf '%s\n' "$past" | grep -ivE "$ex")
+		fi
+		n=$(printf '%s' "$past" | grep -c . )
 		[ "$n" != 0 ] && hit "private patterns found in $n line(s) of past diffs"
 	fi
 fi

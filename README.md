@@ -122,13 +122,13 @@ then press Enter to come back:
 
 <p align="center"><img src="docs/images/run.svg" alt="the commands running, each with its result" width="860"></p>
  hostdiff scans the affected groups again and
-says what happened, for example `mini: 1 of 2 removed, 1 failed`. Every item
+says what happened, for example `workstation: 1 of 2 removed, 1 failed`. Every item
 is marked in the table (`✓` `✗` `?`), and `o` shows each command with its exit
 status. That summary stays until the next run.
 
 <p align="center"><img src="docs/images/after.svg" alt="after the run: both items marked as done" width="860"></p>
 
-**Clone.** `C` offers "Make air like mini" (or the other way round) for the
+**Clone.** `C` offers "Make laptop like workstation" (or the other way round) for the
 groups you compared: installs, updates and removals in one run, removals last.
 If anything would be removed or reset you have to type `yes`.
 

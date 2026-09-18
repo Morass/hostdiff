@@ -1,8 +1,8 @@
 #!/bin/sh
 # Regenerates the README screenshots in docs/images/.
 #
-# Everything runs in a throwaway world: two pretend machines ("air" here,
-# "mini" over a stand-in ssh) with a simulated Homebrew and a few fonts, homes
+# Everything runs in a throwaway world: two pretend machines ("laptop" here,
+# "workstation" over a stand-in ssh) with a simulated Homebrew and a few fonts, homes
 # under /tmp, no system state. hostdiff itself is the real binary, driven
 # through tmux; each screen is captured with colours and rendered to SVG by
 # scripts/ansi2svg. Needs: go, tmux.
@@ -46,7 +46,7 @@ BREW
 	chmod 755 "$home/.stubs/brew"
 }
 
-machine "$W/air" "git 2.51.0
+machine "$W/laptop" "git 2.51.0
 jq 1.8.1
 node 24.8.0
 python@3.13 3.13.7
@@ -55,7 +55,7 @@ wget 1.25.0
 " "iterm2 3.5.14
 rectangle 0.87
 " "Inter.ttf" "JetBrainsMono-Regular.ttf"
-machine "$W/remotes/mini" "fzf 0.65.1
+machine "$W/remotes/workstation" "fzf 0.65.1
 git 2.51.0
 htop 3.4.1
 node 22.19.0
@@ -65,8 +65,8 @@ ripgrep 14.1.1
 iterm2 3.5.14
 raycast 1.103.2
 " "FiraCode-Regular.ttf" "Inter.ttf"
-mkdir -p "$W/remotes/mini/.local/bin"
-cp "$W/bin/hostdiff" "$W/remotes/mini/.local/bin/hostdiff"
+mkdir -p "$W/remotes/workstation/.local/bin"
+cp "$W/bin/hostdiff" "$W/remotes/workstation/.local/bin/hostdiff"
 
 cat >"$W/bin/ssh" <<'EOF2'
 #!/bin/sh
@@ -77,12 +77,12 @@ home="$FAKE_SSH_ROOT/$dest"
 exec env -i HOME="$home" PATH="$home/.stubs:/usr/bin:/bin" HOSTDIFF_SYSROOT="$FAKE_SYSROOT" HOSTDIFF_HOSTNAME="$dest" SSH_CONNECTION="sandbox 1 sandbox 22" TERM=xterm-256color /bin/sh -c "$*"
 EOF2
 chmod 755 "$W/bin/ssh"
-printf '[machines.air]\nlocal = true\n\n[machines.mini]\nssh = "mini"\n' >"$W/config.toml"
+printf '[machines.laptop]\nlocal = true\n\n[machines.workstation]\nssh = "workstation"\n' >"$W/config.toml"
 chmod 600 "$W/config.toml"
 
 COLS=118 ROWS=30
 $T -f /dev/null new-session -d -s t -x $COLS -y $ROWS \
-	"env -i HOME=$W/air PATH=$W/air/.stubs:/usr/bin:/bin TERM=xterm-256color HOSTDIFF_SSH=$W/bin/ssh HOSTDIFF_SYSROOT=$W/sys HOSTDIFF_HOSTNAME=air FAKE_SSH_ROOT=$W/remotes FAKE_SYSROOT=$W/sys HOSTDIFF_CONFIG=$W/config.toml $W/bin/hostdiff; sleep 60"
+	"env -i HOME=$W/laptop PATH=$W/laptop/.stubs:/usr/bin:/bin TERM=xterm-256color HOSTDIFF_SSH=$W/bin/ssh HOSTDIFF_SYSROOT=$W/sys HOSTDIFF_HOSTNAME=laptop FAKE_SSH_ROOT=$W/remotes FAKE_SYSROOT=$W/sys HOSTDIFF_CONFIG=$W/config.toml $W/bin/hostdiff; sleep 60"
 $T set -g status off
 
 nap() { perl -e "select(undef,undef,undef,$1)"; }
@@ -117,7 +117,7 @@ keys Enter
 wait_for "formula"
 shot table "hostdiff"
 keys Tab Space Space Enter
-wait_for "Install on mini"
+wait_for "Install on workstation"
 shot menu "hostdiff"
 keys Enter
 wait_for "exactly as written"
